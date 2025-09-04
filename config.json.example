@@ -1,0 +1,12 @@
+{
+  "database": {
+    "path": "./data/nekohouse.db"
+  },
+  "telegram": {
+    "bot_token": "1:1"
+  },
+  "super_admin_ids": [
+    1
+  ],
+  "time_offset": 3600
+}
