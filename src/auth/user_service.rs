@@ -68,9 +68,14 @@ impl UserService {
         AdminRepository::exists_by_telegram_id(self.database.pool(), user_id).await
     }
 
-    /// 获取管理员信息
+    /// 获取管理员信息（通过Telegram ID）
     pub async fn get_admin_info(&self, user_id: i64) -> Result<Option<Admin>> {
         AdminRepository::find_by_telegram_id(self.database.pool(), user_id).await
+    }
+
+    /// 获取管理员信息（通过数据库unique_id）
+    pub async fn get_admin_info_by_unique_id(&self, unique_id: i64) -> Result<Option<Admin>> {
+        AdminRepository::find_by_unique_id(self.database.pool(), unique_id).await
     }
 
     /// 创建新管理员（只有超级管理员可以操作）

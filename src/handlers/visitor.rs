@@ -233,7 +233,7 @@ async fn generate_password_for_record(
     state: &BotState,
 ) -> Result<()> {
     let user_service = state.user_service.read().await;
-    let admin = user_service.get_admin_info(record.inviter).await?
+    let admin = user_service.get_admin_info_by_unique_id(record.inviter).await?
         .ok_or_else(|| crate::error::AppError::business("管理员信息不存在"))?;
 
     let admin_password = admin.password
