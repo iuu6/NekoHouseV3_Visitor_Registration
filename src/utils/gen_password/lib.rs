@@ -53,6 +53,20 @@ pub enum PasswordType {
     Period(u32, u32, u32, u32), // year, month, day, hour
 }
 
+impl std::fmt::Display for PasswordType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PasswordType::Temporary => write!(f, "临时密码"),
+            PasswordType::Times(times) => write!(f, "次数密码({}次)", times),
+            PasswordType::Limited(hours, 0) => write!(f, "限时密码({}小时)", hours),
+            PasswordType::Limited(hours, minutes) => write!(f, "限时密码({}小时{}分钟)", hours, minutes),
+            PasswordType::Period(year, month, day, hour) => {
+                write!(f, "周期密码(至{:04}-{:02}-{:02} {:02}:00)", year, month, day, hour)
+            },
+        }
+    }
+}
+
 /// 密码生成结果
 #[derive(Debug, Clone)]
 pub struct PasswordResult {

@@ -1,7 +1,7 @@
 //! 临时密码生成算法 Rust 实现
 //! 基于4秒时间窗口生成临时密码，有效期10分钟
 
-use crate::keeloq_crypto::KeeLoqCrypto;
+use super::keeloq_crypto::KeeLoqCrypto;
 
 /// 临时密码生成器
 pub struct TempPasswordGenerator {

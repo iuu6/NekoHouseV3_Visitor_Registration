@@ -1,7 +1,7 @@
 //! 次数限制密码生成算法 Rust 实现
 //! 生成可使用指定次数的密码，有效期20小时
 
-use crate::keeloq_crypto::KeeLoqCrypto;
+use super::keeloq_crypto::KeeLoqCrypto;
 
 /// 次数限制密码生成器
 pub struct TimesPasswordGenerator {

@@ -1,7 +1,9 @@
 //! 工具模块
 
+pub mod gen_password;
+
 // 重新导出gen_password的主要功能
-pub use crate::gen_password::{
+pub use gen_password::{
     UnifiedPasswordGenerator,
     PasswordType,
     PasswordResult,

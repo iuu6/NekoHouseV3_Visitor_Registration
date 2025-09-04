@@ -1,12 +1,12 @@
 //! 演示框架模块
 //! 提供统一的密码演示功能
 
-use crate::ui_utils::{InputHandler, Formatter, ErrorHandler};
-use crate::{UnifiedPasswordGenerator, PasswordType};
-use crate::temp_password::TempPasswordGenerator;
-use crate::times_password::TimesPasswordGenerator;
-use crate::limited_password::LimitedPasswordGenerator;
-use crate::period_password::PeriodPasswordGenerator;
+use super::ui_utils::{InputHandler, Formatter, ErrorHandler};
+use super::{UnifiedPasswordGenerator, PasswordType};
+use super::temp_password::TempPasswordGenerator;
+use super::times_password::TimesPasswordGenerator;
+use super::limited_password::LimitedPasswordGenerator;
+use super::period_password::PeriodPasswordGenerator;
 use chrono::Datelike;
 
 /// 演示框架结构
@@ -138,7 +138,7 @@ impl DemoFramework {
         println!("\n📝 也可以使用字符串格式生成:");
         let datetime_str = format!("{:04}-{:02}-{:02} {:02}:00:00", year, month, day, hour);
         
-        use crate::period_password::generate_period_password_from_string;
+        use super::period_password::generate_period_password_from_string;
         match generate_period_password_from_string(admin_pwd, &datetime_str) {
             Ok((password, expire_time, _)) => {
                 println!("🔐 字符串格式生成的密码: {}", password);

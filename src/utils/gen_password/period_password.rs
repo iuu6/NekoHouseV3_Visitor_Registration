@@ -1,7 +1,7 @@
 //! 周期密码生成算法 Rust 实现
 //! 生成在指定时间段内有效的密码
 
-use crate::keeloq_crypto::KeeLoqCrypto;
+use super::keeloq_crypto::KeeLoqCrypto;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 
 /// 周期密码生成器

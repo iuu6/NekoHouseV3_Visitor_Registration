@@ -1,7 +1,7 @@
 //! 限时密码生成算法 Rust 实现
 //! 生成基于指定时长有效的密码
 
-use crate::keeloq_crypto::KeeLoqCrypto;
+use super::keeloq_crypto::KeeLoqCrypto;
 
 /// 限时密码生成器
 pub struct LimitedPasswordGenerator {

@@ -207,9 +207,9 @@ async fn handle_admin_get_password(
                  类型：{}\n\n\
                  💡 {}",
                 result.password,
-                result.expires_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or("无限期".to_string()),
-                result.password_type.to_string(),
-                format!("密码生成成功，类型：{}", result.password_type)
+                result.expire_time,
+                result.password_type,
+                result.message
             );
 
             bot.send_message(msg.chat.id, message)
@@ -287,12 +287,12 @@ async fn generate_password_for_record(
          密码：`{}`\n\
          类型：{}\n\
          过期时间：{}\n\n\
-         💡 密码生成成功，类型：{}\n\n\
+         💡 {}\n\n\
          ⚠️ 请在有效期内使用，过期后需重新获取",
         result.password,
         type_description,
-        result.expires_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or("无限期".to_string()),
-        result.password_type.to_string()
+        result.expire_time,
+        result.message
     );
 
     bot.send_message(chat_id, message)

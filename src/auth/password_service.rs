@@ -3,7 +3,7 @@
 use crate::config::AppConfig;
 use crate::error::{AppError, Result};
 use crate::types::{AuthType, PasswordRequest};
-use crate::gen_password::{
+use crate::utils::gen_password::{
     UnifiedPasswordGenerator, PasswordType, PasswordResult,
     generate_password, verify_password, get_password_remaining_time,
 };
@@ -52,7 +52,7 @@ impl PasswordService {
         config: &AppConfig,
     ) -> Result<bool> {
         let adjusted_admin_pwd = self.get_adjusted_admin_password(admin_password, config);
-        Ok(verify_password(password, &adjusted_admin_pwd))
+        Ok(verify_password(password, &adjusted_admin_pwd).is_some())
     }
 
     /// 获取密码剩余有效时间
@@ -63,8 +63,7 @@ impl PasswordService {
         config: &AppConfig,
     ) -> Result<Option<String>> {
         let adjusted_admin_pwd = self.get_adjusted_admin_password(admin_password, config);
-        Ok(crate::gen_password::get_password_remaining_time(password, &adjusted_admin_pwd)
-            .map(|duration| format!("{}分钟{}秒", duration.num_minutes(), duration.num_seconds() % 60)))
+        Ok(crate::utils::gen_password::get_password_remaining_time(password, &adjusted_admin_pwd))
     }
 
     /// 检查长期临时密码是否可以生成（5分钟限制）
@@ -94,7 +93,8 @@ impl PasswordService {
 
     /// 生成临时密码（10分钟有效）
     fn generate_temp_password(&self, admin_pwd: &str) -> Result<PasswordResult> {
-        let result = generate_password(admin_pwd, PasswordType::Temp);
+        let result = generate_password(admin_pwd, PasswordType::Temporary)
+            .map_err(|e| AppError::password_generation(e))?;
         Ok(result)
     }
 
@@ -106,7 +106,8 @@ impl PasswordService {
             return Err(AppError::validation("使用次数必须在1-31之间"));
         }
 
-        let result = generate_password(admin_pwd, PasswordType::Times(use_times as i32));
+        let result = generate_password(admin_pwd, PasswordType::Times(use_times))
+            .map_err(|e| AppError::password_generation(e))?;
         Ok(result)
     }
 
@@ -123,67 +124,46 @@ impl PasswordService {
             return Err(AppError::validation("分钟数只能是0或30"));
         }
 
-        let duration = chrono::Duration::hours(hours as i64) + chrono::Duration::minutes(minutes as i64);
-        let result = generate_password(admin_pwd, PasswordType::Limited(duration));
+        let result = generate_password(admin_pwd, PasswordType::Limited(hours, minutes))
+            .map_err(|e| AppError::password_generation(e))?;
         Ok(result)
     }
 
     /// 生成周期密码（指定过期时间）
     fn generate_period_password(&self, admin_pwd: &str, request: &PasswordRequest) -> Result<PasswordResult> {
-        // 构建时间字符串
-        let datetime_str = if let (Some(year), Some(month), Some(day), Some(hour)) =
-            (request.end_year, request.end_month, request.end_day, request.end_hour) {
-            format!("{:04}-{:02}-{:02} {:02}:00:00", year, month, day, hour)
-        } else {
-            return Err(AppError::validation("周期密码必须指定完整的结束时间"));
-        };
+        let year = request.end_year.ok_or_else(|| AppError::validation("周期密码必须指定年份"))?;
+        let month = request.end_month.ok_or_else(|| AppError::validation("周期密码必须指定月份"))?;
+        let day = request.end_day.ok_or_else(|| AppError::validation("周期密码必须指定日期"))?;
+        let hour = request.end_hour.ok_or_else(|| AppError::validation("周期密码必须指定小时"))?;
 
         // 验证时间参数
-        if let Some(year) = request.end_year {
-            if year < 2024 || year > 2099 {
-                return Err(AppError::validation("年份必须在2024-2099之间"));
-            }
+        if year < 2024 || year > 2099 {
+            return Err(AppError::validation("年份必须在2024-2099之间"));
         }
         
-        if let Some(month) = request.end_month {
-            if month < 1 || month > 12 {
-                return Err(AppError::validation("月份必须在1-12之间"));
-            }
+        if month < 1 || month > 12 {
+            return Err(AppError::validation("月份必须在1-12之间"));
         }
         
-        if let Some(day) = request.end_day {
-            if day < 1 || day > 31 {
-                return Err(AppError::validation("日期必须在1-31之间"));
-            }
+        if day < 1 || day > 31 {
+            return Err(AppError::validation("日期必须在1-31之间"));
         }
         
-        if let Some(hour) = request.end_hour {
-            if hour > 23 {
-                return Err(AppError::validation("小时必须在0-23之间"));
-            }
+        if hour > 23 {
+            return Err(AppError::validation("小时必须在0-23之间"));
         }
 
-        // 解析时间
-        let end_time = chrono::DateTime::parse_from_str(&format!("{} +0000", datetime_str), "%Y-%m-%d %H:%M:%S %z")
-            .map_err(|_| AppError::validation("无效的时间格式"))?
-            .with_timezone(&Utc);
-
-        let result = generate_password(admin_pwd, PasswordType::Period(end_time));
+        let result = generate_password(admin_pwd, PasswordType::Period(year, month, day, hour))
+            .map_err(|e| AppError::password_generation(e))?;
         Ok(result)
     }
 
-    /// 生成长期临时密码
-    fn generate_longtime_temp_password(&self, admin_pwd: &str, request: &PasswordRequest) -> Result<PasswordResult> {
+    /// 生成长期临时密码（使用临时密码算法）
+    fn generate_longtime_temp_password(&self, admin_pwd: &str, _request: &PasswordRequest) -> Result<PasswordResult> {
         // 长期临时密码实际上就是一个临时密码，但有特殊的使用限制
         // 在5分钟内只能生成一次，超过5分钟可以重新申请
-        
-        let end_time = if let Some(end_time) = request.start_time {
-            end_time
-        } else {
-            Utc::now() + chrono::Duration::hours(24) // 默认24小时
-        };
-        
-        let result = generate_password(admin_pwd, PasswordType::LongtimeTemp(end_time));
+        let result = generate_password(admin_pwd, PasswordType::Temporary)
+            .map_err(|e| AppError::password_generation(e))?;
         Ok(result)
     }
 

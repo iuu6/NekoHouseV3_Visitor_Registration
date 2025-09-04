@@ -21,4 +21,4 @@ pub use config::{AppConfig, ConfigManager};
 pub use database::Database;
 pub use error::{Result, AppError};
 pub use types::{UserRole, AuthStatus, AuthType, UserInfo, Admin, Record};
-pub use gen_password::{UnifiedPasswordGenerator, PasswordType, PasswordResult};
+pub use utils::{UnifiedPasswordGenerator, PasswordType, PasswordResult};
