@@ -376,3 +376,165 @@ mod tests {
         }
     }
 }
+
+/// 支持时间偏移的限时密码生成器
+pub struct LimitedPasswordGeneratorWithOffset {
+    crypto: KeeLoqCrypto,
+    time_offset: i32,
+}
+
+impl LimitedPasswordGeneratorWithOffset {
+    /// 创建新的带时间偏移的限时密码生成器实例
+    pub fn new(time_offset: i32) -> Self {
+        LimitedPasswordGeneratorWithOffset {
+            crypto: KeeLoqCrypto::new(),
+            time_offset,
+        }
+    }
+
+    /// 生成限时密码（考虑时间偏移）
+    pub fn generate(&self, admin_pwd: &str, hours: u32, minutes: u32) -> Result<(String, String, String), String> {
+        // 检查管理员密码长度
+        if admin_pwd.len() < 4 {
+            return Err("管理员密码至少需要4位".to_string());
+        }
+
+        // 检查小时数范围
+        if hours > 127 {
+            return Err("小时数不能超过127".to_string());
+        }
+
+        // 检查分钟数（只允许0或30）
+        if minutes != 0 && minutes != 30 {
+            return Err("分钟数只能是0或30".to_string());
+        }
+
+        // 计算总的半小时数
+        let total_half_hours = hours * 2 + (minutes / 30);
+
+        // 获取带偏移的UTC+8当前时间戳（毫秒）
+        let current_time_ms = KeeLoqCrypto::get_utc8_timestamp_with_offset(self.time_offset);
+        
+        // 转换为30分钟时间窗口
+        let time_window = (current_time_ms / 1800000) as u32;
+        
+        // 计算过期时间（显示给用户的是真实时间）
+        let real_current_time_ms = KeeLoqCrypto::get_utc8_timestamp();
+        let real_time_window = (real_current_time_ms / 1800000) as u32;
+        let expire_time_ms = ((real_time_window + total_half_hours) as i64) * 1800000;
+        
+        // 构造加密输入
+        let mut crypto_input = time_window * 256;
+        crypto_input += 2147483648; // 0x80000000
+        crypto_input += total_half_hours;
+        
+        // 使用KeeLoq加密算法生成密码
+        let encrypted_code = self.crypto.crypt_usercode(crypto_input, admin_pwd);
+        
+        // 添加前缀
+        let password_num = 5000000000u64 + encrypted_code.parse::<u64>().unwrap_or(0);
+        let password = password_num.to_string();
+        
+        // 格式化过期时间（显示真实时间）
+        let expire_time_str = KeeLoqCrypto::format_utc8_time(expire_time_ms);
+        
+        // 生成持续时间描述
+        let duration_desc = if hours == 0 {
+            format!("{}分钟", minutes)
+        } else if minutes == 0 {
+            if hours == 1 {
+                "1小时".to_string()
+            } else {
+                format!("{}小时", hours)
+            }
+        } else {
+            if hours == 1 {
+                format!("1小时{}分钟", minutes)
+            } else {
+                format!("{}小时{}分钟", hours, minutes)
+            }
+        };
+        
+        // 生成消息
+        let message = format!("限时密码，有效时长{}，过期时间 {}", duration_desc, expire_time_str);
+        
+        Ok((password, expire_time_str, message))
+    }
+
+    /// 验证限时密码是否有效（考虑时间偏移）
+    pub fn verify(&self, password: &str, admin_pwd: &str, tolerance_windows: u32) -> Option<(u32, u32)> {
+        if admin_pwd.len() < 4 {
+            return None;
+        }
+
+        // 移除前缀，获取实际的加密代码
+        let password_num = match password.parse::<u64>() {
+            Ok(num) if num >= 5000000000 => num - 5000000000,
+            _ => return None,
+        };
+
+        // 使用带偏移的时间戳
+        let current_time_ms = KeeLoqCrypto::get_utc8_timestamp_with_offset(self.time_offset);
+        let current_window = (current_time_ms / 1800000) as u32;
+
+        // 在容忍范围内检查时间窗口
+        for window_offset in 0..=tolerance_windows {
+            for &direction in &[0i32, 1i32, -1i32] {
+                let check_window = match direction {
+                    0 => current_window,
+                    1 => current_window + window_offset,
+                    -1 => current_window.wrapping_sub(window_offset),
+                    _ => continue,
+                };
+
+                // 检查不同的时长组合
+                for hours in 0..=127 {
+                    for &minutes in &[0, 30] {
+                        let total_half_hours = hours * 2 + (minutes / 30);
+                        
+                        let mut crypto_input = check_window * 256;
+                        crypto_input += 2147483648;
+                        crypto_input += total_half_hours;
+                        
+                        let expected_code = self.crypto.crypt_usercode(crypto_input, admin_pwd);
+                        
+                        if password_num == expected_code.parse::<u64>().unwrap_or(0) {
+                            // 检查密码是否还在有效期内（基于真实时间）
+                            let real_current_time_ms = KeeLoqCrypto::get_utc8_timestamp();
+                            let password_expire_time = ((check_window + total_half_hours) as i64) * 1800000;
+                            if real_current_time_ms <= password_expire_time {
+                                return Some((hours, minutes));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// 检查密码剩余有效时间（考虑时间偏移）
+    pub fn check_remaining_time(&self, password: &str, admin_pwd: &str) -> Option<(String, u32, u32)> {
+        if let Some((hours, minutes)) = self.verify(password, admin_pwd, 5) {
+            // 显示的剩余时间基于真实时间
+            let current_time_ms = KeeLoqCrypto::get_utc8_timestamp();
+            let current_window = (current_time_ms / 1800000) as u32;
+            
+            // 根据验证结果计算过期时间
+            let _total_half_hours = hours * 2 + (minutes / 30);
+            let expire_window = current_window + 1; // 至少到下个窗口
+            let expire_time_ms = (expire_window as i64) * 1800000;
+            
+            let remaining_ms = expire_time_ms - current_time_ms;
+            
+            if remaining_ms > 0 {
+                let remaining_hours = remaining_ms / (1000 * 60 * 60);
+                let remaining_minutes = (remaining_ms % (1000 * 60 * 60)) / (1000 * 60);
+                let remaining_str = format!("{}小时{}分钟", remaining_hours, remaining_minutes);
+                return Some((remaining_str, hours, minutes));
+            }
+        }
+        None
+    }
+}

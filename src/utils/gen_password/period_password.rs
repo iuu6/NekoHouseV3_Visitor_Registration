@@ -432,3 +432,191 @@ mod tests {
         }
     }
 }
+
+/// 支持时间偏移的周期密码生成器
+pub struct PeriodPasswordGeneratorWithOffset {
+    crypto: KeeLoqCrypto,
+    time_offset: i32,
+}
+
+impl PeriodPasswordGeneratorWithOffset {
+    /// 创建新的带时间偏移的周期密码生成器实例
+    pub fn new(time_offset: i32) -> Self {
+        PeriodPasswordGeneratorWithOffset {
+            crypto: KeeLoqCrypto::new(),
+            time_offset,
+        }
+    }
+
+    /// 生成周期密码（考虑时间偏移）
+    pub fn generate(&self, admin_pwd: &str, end_year: u32, end_month: u32, end_day: u32, end_hour: u32) -> Result<(String, String, String), String> {
+        // 检查管理员密码长度
+        if admin_pwd.len() < 4 {
+            return Err("管理员密码至少需要4位".to_string());
+        }
+
+        // 验证日期参数
+        if end_month < 1 || end_month > 12 {
+            return Err("月份必须在1-12之间".to_string());
+        }
+        if end_day < 1 || end_day > 31 {
+            return Err("日期必须在1-31之间".to_string());
+        }
+        if end_hour > 23 {
+            return Err("小时必须在0-23之间".to_string());
+        }
+
+        // 创建结束时间
+        let end_date = match NaiveDate::from_ymd_opt(end_year as i32, end_month, end_day) {
+            Some(date) => date,
+            None => return Err("无效的日期".to_string()),
+        };
+        
+        let end_time = NaiveTime::from_hms_opt(end_hour, 0, 0).unwrap();
+        let end_datetime = NaiveDateTime::new(end_date, end_time);
+        
+        // 转换为UTC+8时区
+        let beijing_tz = FixedOffset::east_opt(8 * 3600).unwrap();
+        let end_datetime_tz = beijing_tz.from_local_datetime(&end_datetime).single()
+            .ok_or("无法转换到UTC+8时区")?;
+
+        // 获取带偏移的当前UTC+8时间
+        let current_time_ms = KeeLoqCrypto::get_utc8_timestamp_with_offset(self.time_offset);
+        let current_datetime = DateTime::from_timestamp_millis(current_time_ms)
+            .unwrap()
+            .with_timezone(&beijing_tz);
+
+        // 获取真实的当前时间（用于显示）
+        let real_current_time_ms = KeeLoqCrypto::get_utc8_timestamp();
+        let real_current_datetime = DateTime::from_timestamp_millis(real_current_time_ms)
+            .unwrap()
+            .with_timezone(&beijing_tz);
+
+        // 检查结束时间是否晚于真实当前时间
+        if end_datetime_tz <= real_current_datetime {
+            return Err("结束时间必须晚于当前时间".to_string());
+        }
+
+        // 计算时间戳（秒）- 使用带偏移的时间
+        let current_timestamp_sec = current_time_ms / 1000 + 28800;
+        let end_timestamp_sec = end_datetime_tz.timestamp();
+
+        // 计算天数（从1970-01-01开始的天数）
+        let current_days = (current_timestamp_sec / 86400) as u32;
+        
+        // 构造加密输入
+        let mut crypto_input = current_days * 32768 + 3221225472; // 0xC0000000
+        
+        // 计算结束时间的小时数
+        let end_day_start_sec = current_days as i64 * 86400;
+        let hours_from_day_start = ((end_timestamp_sec - end_day_start_sec) / 3600) + 8;
+        
+        // 检查小时数是否超出支持范围
+        if hours_from_day_start > 32768 {
+            return Err("结束时间超出支持范围".to_string());
+        }
+        
+        crypto_input += hours_from_day_start as u32;
+        
+        // 使用KeeLoq加密算法生成密码
+        let encrypted_code = self.crypto.crypt_usercode(crypto_input, admin_pwd);
+        
+        // 添加前缀
+        let password_num = 5000000000u64 + encrypted_code.parse::<u64>().unwrap_or(0);
+        let password = password_num.to_string();
+        
+        // 格式化过期时间（显示真实时间）
+        let expire_time_str = end_datetime_tz.format("%Y-%m-%d %H:%M:%S").to_string();
+        
+        // 生成消息
+        let message = format!("周期密码，有效期至 {}", expire_time_str);
+        
+        Ok((password, expire_time_str, message))
+    }
+
+    /// 验证周期密码是否有效（考虑时间偏移）
+    pub fn verify(&self, password: &str, admin_pwd: &str, tolerance_days: u32) -> Option<String> {
+        if admin_pwd.len() < 4 {
+            return None;
+        }
+
+        // 移除前缀，获取实际的加密代码
+        let password_num = match password.parse::<u64>() {
+            Ok(num) if num >= 5000000000 => num - 5000000000,
+            _ => return None,
+        };
+
+        // 使用带偏移的时间戳
+        let current_time_ms = KeeLoqCrypto::get_utc8_timestamp_with_offset(self.time_offset);
+        let current_timestamp_sec = current_time_ms / 1000 + 28800;
+        let current_days = (current_timestamp_sec / 86400) as u32;
+
+        // 在容忍范围内检查天数
+        for day_offset in 0..=tolerance_days {
+            for &direction in &[0i32, -1i32] {
+                let check_days = if direction < 0 && day_offset > 0 {
+                    current_days.wrapping_sub(day_offset)
+                } else if direction == 0 {
+                    current_days
+                } else {
+                    continue;
+                };
+
+                // 检查不同的小时数
+                for hours in 8..=32776 {
+                    let mut crypto_input = check_days * 32768 + 3221225472;
+                    crypto_input += hours;
+                    
+                    let expected_code = self.crypto.crypt_usercode(crypto_input, admin_pwd);
+                    
+                    if password_num == expected_code.parse::<u64>().unwrap_or(0) {
+                        // 使用生成时的逆向计算来获得实际的过期时间
+                        let actual_end_timestamp = ((hours - 8) * 3600) as i64 + (check_days as i64) * 86400;
+                        
+                        // 检查是否还在有效期内（基于真实时间）
+                        let real_current_time_ms = KeeLoqCrypto::get_utc8_timestamp();
+                        if (real_current_time_ms / 1000 + 28800) <= actual_end_timestamp {
+                            let beijing_tz = FixedOffset::east_opt(8 * 3600).unwrap();
+                            if let Some(expire_datetime) = DateTime::from_timestamp(actual_end_timestamp, 0) {
+                                let expire_datetime_tz = expire_datetime.with_timezone(&beijing_tz);
+                                return Some(expire_datetime_tz.format("%Y-%m-%d %H:%M:%S").to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// 检查密码剩余有效时间（考虑时间偏移）
+    pub fn check_remaining_time(&self, password: &str, admin_pwd: &str) -> Option<(String, String)> {
+        if let Some(expire_time_str) = self.verify(password, admin_pwd, 3) {
+            // 解析过期时间
+            if let Ok(expire_datetime) = DateTime::parse_from_str(&format!("{} +08:00", expire_time_str), "%Y-%m-%d %H:%M:%S %z") {
+                // 显示的剩余时间基于真实时间
+                let current_time_ms = KeeLoqCrypto::get_utc8_timestamp();
+                let expire_time_ms = expire_datetime.timestamp_millis();
+                let remaining_ms = expire_time_ms - current_time_ms;
+                
+                if remaining_ms > 0 {
+                    let remaining_days = remaining_ms / (1000 * 60 * 60 * 24);
+                    let remaining_hours = (remaining_ms % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60);
+                    let remaining_minutes = (remaining_ms % (1000 * 60 * 60)) / (1000 * 60);
+                    
+                    let remaining_str = if remaining_days > 0 {
+                        format!("{}天{}小时{}分钟", remaining_days, remaining_hours, remaining_minutes)
+                    } else if remaining_hours > 0 {
+                        format!("{}小时{}分钟", remaining_hours, remaining_minutes)
+                    } else {
+                        format!("{}分钟", remaining_minutes)
+                    };
+                    
+                    return Some((remaining_str, expire_time_str));
+                }
+            }
+        }
+        None
+    }
+}

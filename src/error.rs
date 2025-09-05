@@ -69,5 +69,11 @@ impl AppError {
     }
 }
 
+impl From<String> for AppError {
+    fn from(msg: String) -> Self {
+        Self::Other(msg)
+    }
+}
+
 /// 应用程序Result类型
 pub type Result<T> = std::result::Result<T, AppError>;

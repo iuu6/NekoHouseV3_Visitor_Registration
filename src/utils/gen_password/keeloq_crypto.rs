@@ -174,9 +174,22 @@ impl KeeLoqCrypto {
         beijing_time.timestamp_millis()
     }
 
+    /// 获取带时间偏移的UTC+8时间戳（毫秒）
+    /// time_offset_seconds: 时间偏移秒数，用于密码锁防重放攻击
+    pub fn get_utc8_timestamp_with_offset(time_offset_seconds: i32) -> i64 {
+        let beijing_tz = FixedOffset::east_opt(8 * 3600).unwrap();
+        let beijing_time: DateTime<FixedOffset> = Utc::now().with_timezone(&beijing_tz);
+        beijing_time.timestamp_millis() + (time_offset_seconds as i64 * 1000)
+    }
+
     /// 获取UTC+8时间戳（秒）
     pub fn get_utc8_timestamp_sec() -> i64 {
         Self::get_utc8_timestamp() / 1000
+    }
+
+    /// 获取带时间偏移的UTC+8时间戳（秒）
+    pub fn get_utc8_timestamp_sec_with_offset(time_offset_seconds: i32) -> i64 {
+        Self::get_utc8_timestamp_with_offset(time_offset_seconds) / 1000
     }
 
     /// 格式化UTC+8时间为字符串

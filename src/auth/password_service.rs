@@ -32,15 +32,13 @@ impl PasswordService {
         request: &PasswordRequest,
         config: &AppConfig,
     ) -> Result<PasswordResult> {
-        // 获取调整后的管理员密码（考虑时间偏移）
-        let adjusted_admin_pwd = self.get_adjusted_admin_password(&request.admin_password, config);
-        
+        // 时间偏移不应该修改管理员密码，而是在时间戳计算时应用
         match request.auth_type {
-            AuthType::Temp => self.generate_temp_password(&adjusted_admin_pwd),
-            AuthType::Times => self.generate_times_password(&adjusted_admin_pwd, request.times),
-            AuthType::Limited => self.generate_limited_password(&adjusted_admin_pwd, request.hours, request.minutes),
-            AuthType::Period => self.generate_period_password(&adjusted_admin_pwd, request),
-            AuthType::LongtimeTemp => self.generate_longtime_temp_password(&adjusted_admin_pwd, request),
+            AuthType::Temp => self.generate_temp_password(&request.admin_password, config.time_offset as i32),
+            AuthType::Times => self.generate_times_password(&request.admin_password, request.times, config.time_offset as i32),
+            AuthType::Limited => self.generate_limited_password(&request.admin_password, request.hours, request.minutes, config.time_offset as i32),
+            AuthType::Period => self.generate_period_password(&request.admin_password, request, config.time_offset as i32),
+            AuthType::LongtimeTemp => self.generate_longtime_temp_password(&request.admin_password, request, config.time_offset as i32),
         }
     }
 
@@ -51,8 +49,8 @@ impl PasswordService {
         admin_password: &str,
         config: &AppConfig,
     ) -> Result<bool> {
-        let adjusted_admin_pwd = self.get_adjusted_admin_password(admin_password, config);
-        Ok(verify_password(password, &adjusted_admin_pwd).is_some())
+        // 验证时也需要考虑时间偏移
+        Ok(self.verify_password_with_offset(password, admin_password, config.time_offset as i32).is_some())
     }
 
     /// 获取密码剩余有效时间
@@ -62,8 +60,7 @@ impl PasswordService {
         admin_password: &str,
         config: &AppConfig,
     ) -> Result<Option<String>> {
-        let adjusted_admin_pwd = self.get_adjusted_admin_password(admin_password, config);
-        Ok(crate::utils::gen_password::get_password_remaining_time(password, &adjusted_admin_pwd))
+        Ok(self.get_remaining_time_with_offset(password, admin_password, config.time_offset as i32))
     }
 
     /// 检查长期临时密码是否可以生成（5分钟限制）
@@ -92,27 +89,25 @@ impl PasswordService {
     }
 
     /// 生成临时密码（10分钟有效）
-    fn generate_temp_password(&self, admin_pwd: &str) -> Result<PasswordResult> {
-        let result = generate_password(admin_pwd, PasswordType::Temporary)
-            .map_err(|e| AppError::password_generation(e))?;
+    fn generate_temp_password(&self, admin_pwd: &str, time_offset: i32) -> Result<PasswordResult> {
+        let result = self.generate_password_with_offset(admin_pwd, PasswordType::Temporary, time_offset)?;
         Ok(result)
     }
 
     /// 生成次数限制密码（2小时有效）
-    fn generate_times_password(&self, admin_pwd: &str, times: Option<u32>) -> Result<PasswordResult> {
+    fn generate_times_password(&self, admin_pwd: &str, times: Option<u32>, time_offset: i32) -> Result<PasswordResult> {
         let use_times = times.ok_or_else(|| AppError::validation("次数密码必须指定使用次数"))?;
         
         if use_times < 1 || use_times > 31 {
             return Err(AppError::validation("使用次数必须在1-31之间"));
         }
 
-        let result = generate_password(admin_pwd, PasswordType::Times(use_times))
-            .map_err(|e| AppError::password_generation(e))?;
+        let result = self.generate_password_with_offset(admin_pwd, PasswordType::Times(use_times), time_offset)?;
         Ok(result)
     }
 
     /// 生成限时密码
-    fn generate_limited_password(&self, admin_pwd: &str, hours: Option<u32>, minutes: Option<u32>) -> Result<PasswordResult> {
+    fn generate_limited_password(&self, admin_pwd: &str, hours: Option<u32>, minutes: Option<u32>, time_offset: i32) -> Result<PasswordResult> {
         let hours = hours.ok_or_else(|| AppError::validation("限时密码必须指定小时数"))?;
         let minutes = minutes.unwrap_or(0);
 
@@ -124,13 +119,12 @@ impl PasswordService {
             return Err(AppError::validation("分钟数只能是0或30"));
         }
 
-        let result = generate_password(admin_pwd, PasswordType::Limited(hours, minutes))
-            .map_err(|e| AppError::password_generation(e))?;
+        let result = self.generate_password_with_offset(admin_pwd, PasswordType::Limited(hours, minutes), time_offset)?;
         Ok(result)
     }
 
     /// 生成周期密码（指定过期时间）
-    fn generate_period_password(&self, admin_pwd: &str, request: &PasswordRequest) -> Result<PasswordResult> {
+    fn generate_period_password(&self, admin_pwd: &str, request: &PasswordRequest, time_offset: i32) -> Result<PasswordResult> {
         let year = request.end_year.ok_or_else(|| AppError::validation("周期密码必须指定年份"))?;
         let month = request.end_month.ok_or_else(|| AppError::validation("周期密码必须指定月份"))?;
         let day = request.end_day.ok_or_else(|| AppError::validation("周期密码必须指定日期"))?;
@@ -153,28 +147,127 @@ impl PasswordService {
             return Err(AppError::validation("小时必须在0-23之间"));
         }
 
-        let result = generate_password(admin_pwd, PasswordType::Period(year, month, day, hour))
-            .map_err(|e| AppError::password_generation(e))?;
+        let result = self.generate_password_with_offset(admin_pwd, PasswordType::Period(year, month, day, hour), time_offset)?;
         Ok(result)
     }
 
     /// 生成长期临时密码（使用临时密码算法）
-    fn generate_longtime_temp_password(&self, admin_pwd: &str, _request: &PasswordRequest) -> Result<PasswordResult> {
+    fn generate_longtime_temp_password(&self, admin_pwd: &str, _request: &PasswordRequest, time_offset: i32) -> Result<PasswordResult> {
         // 长期临时密码实际上就是一个临时密码，但有特殊的使用限制
         // 在5分钟内只能生成一次，超过5分钟可以重新申请
-        let result = generate_password(admin_pwd, PasswordType::Temporary)
-            .map_err(|e| AppError::password_generation(e))?;
+        let result = self.generate_password_with_offset(admin_pwd, PasswordType::Temporary, time_offset)?;
         Ok(result)
     }
 
-    /// 获取调整后的管理员密码（加入时间偏移）
-    fn get_adjusted_admin_password(&self, admin_password: &str, config: &AppConfig) -> String {
-        if config.time_offset == 0 {
-            admin_password.to_string()
-        } else {
-            // 将时间偏移融入到密码中，增加安全性
-            format!("{}{}", admin_password, config.time_offset.abs() % 10000)
+    /// 使用时间偏移生成密码的内部方法
+    fn generate_password_with_offset(&self, admin_pwd: &str, password_type: PasswordType, time_offset: i32) -> Result<PasswordResult> {
+        // 创建带偏移的生成器实例
+        let temp_gen = crate::utils::gen_password::TempPasswordGeneratorWithOffset::new(time_offset);
+        let times_gen = crate::utils::gen_password::TimesPasswordGeneratorWithOffset::new(time_offset);
+        let limited_gen = crate::utils::gen_password::LimitedPasswordGeneratorWithOffset::new(time_offset);
+        let period_gen = crate::utils::gen_password::PeriodPasswordGeneratorWithOffset::new(time_offset);
+        
+        match password_type {
+            PasswordType::Temporary => {
+                let (password, expire_time, message) = temp_gen.generate(admin_pwd)
+                    .map_err(|e| AppError::password_generation(e))?;
+                Ok(PasswordResult {
+                    password,
+                    expire_time,
+                    message,
+                    password_type: PasswordType::Temporary,
+                })
+            }
+            PasswordType::Times(count) => {
+                let (password, expire_time, message) = times_gen.generate(admin_pwd, count)
+                    .map_err(|e| AppError::password_generation(e))?;
+                Ok(PasswordResult {
+                    password,
+                    expire_time,
+                    message,
+                    password_type: PasswordType::Times(count),
+                })
+            }
+            PasswordType::Limited(hours, minutes) => {
+                let (password, expire_time, message) = limited_gen.generate(admin_pwd, hours, minutes)
+                    .map_err(|e| AppError::password_generation(e))?;
+                Ok(PasswordResult {
+                    password,
+                    expire_time,
+                    message,
+                    password_type: PasswordType::Limited(hours, minutes),
+                })
+            }
+            PasswordType::Period(year, month, day, hour) => {
+                let (password, expire_time, message) = period_gen.generate(admin_pwd, year, month, day, hour)
+                    .map_err(|e| AppError::password_generation(e))?;
+                Ok(PasswordResult {
+                    password,
+                    expire_time,
+                    message,
+                    password_type: PasswordType::Period(year, month, day, hour),
+                })
+            }
         }
+    }
+
+    /// 使用时间偏移验证密码
+    fn verify_password_with_offset(&self, password: &str, admin_pwd: &str, time_offset: i32) -> Option<PasswordType> {
+        // 创建带偏移的生成器实例进行验证
+        let temp_gen = crate::utils::gen_password::TempPasswordGeneratorWithOffset::new(time_offset);
+        let times_gen = crate::utils::gen_password::TimesPasswordGeneratorWithOffset::new(time_offset);
+        let limited_gen = crate::utils::gen_password::LimitedPasswordGeneratorWithOffset::new(time_offset);
+        let period_gen = crate::utils::gen_password::PeriodPasswordGeneratorWithOffset::new(time_offset);
+
+        // 尝试验证临时密码
+        if temp_gen.verify(password, admin_pwd, 150) {
+            return Some(PasswordType::Temporary);
+        }
+
+        // 尝试验证次数密码
+        if let Some(times) = times_gen.verify(password, admin_pwd, 0, 2) {
+            return Some(PasswordType::Times(times));
+        }
+
+        // 尝试验证限时密码
+        if let Some((hours, minutes)) = limited_gen.verify(password, admin_pwd, 2) {
+            return Some(PasswordType::Limited(hours, minutes));
+        }
+
+        // 尝试验证周期密码
+        if let Some(_expire_time) = period_gen.verify(password, admin_pwd, 1) {
+            return Some(PasswordType::Period(0, 0, 0, 0));
+        }
+
+        None
+    }
+
+    /// 使用时间偏移获取密码剩余时间
+    fn get_remaining_time_with_offset(&self, password: &str, admin_pwd: &str, time_offset: i32) -> Option<String> {
+        let temp_gen = crate::utils::gen_password::TempPasswordGeneratorWithOffset::new(time_offset);
+        let times_gen = crate::utils::gen_password::TimesPasswordGeneratorWithOffset::new(time_offset);
+        let limited_gen = crate::utils::gen_password::LimitedPasswordGeneratorWithOffset::new(time_offset);
+        let period_gen = crate::utils::gen_password::PeriodPasswordGeneratorWithOffset::new(time_offset);
+
+        // 尝试不同类型的剩余时间检查
+        if let Some(remaining) = temp_gen.check_remaining_time(password, admin_pwd) {
+            let remaining_minutes = remaining / (1000 * 60);
+            return Some(format!("{}分钟", remaining_minutes));
+        }
+
+        if let Some((remaining_str, _times)) = times_gen.check_remaining_time(password, admin_pwd) {
+            return Some(remaining_str);
+        }
+
+        if let Some((remaining_str, _hours, _minutes)) = limited_gen.check_remaining_time(password, admin_pwd) {
+            return Some(remaining_str);
+        }
+
+        if let Some((remaining_str, _expire_time)) = period_gen.check_remaining_time(password, admin_pwd) {
+            return Some(remaining_str);
+        }
+
+        None
     }
 
     /// 根据授权类型获取默认过期时间

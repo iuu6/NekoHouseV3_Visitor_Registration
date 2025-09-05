@@ -24,10 +24,10 @@ pub mod config;
 pub use keeloq_crypto::KeeLoqCrypto;
 
 // 密码生成器
-pub use temp_password::TempPasswordGenerator;
-pub use times_password::TimesPasswordGenerator;
-pub use limited_password::LimitedPasswordGenerator;
-pub use period_password::PeriodPasswordGenerator;
+pub use temp_password::{TempPasswordGenerator, TempPasswordGeneratorWithOffset};
+pub use times_password::{TimesPasswordGenerator, TimesPasswordGeneratorWithOffset};
+pub use limited_password::{LimitedPasswordGenerator, LimitedPasswordGeneratorWithOffset};
+pub use period_password::{PeriodPasswordGenerator, PeriodPasswordGeneratorWithOffset};
 
 // 便捷函数
 pub use temp_password::{generate_temp_password, verify_temp_password};

@@ -233,3 +233,110 @@ mod tests {
         }
     }
 }
+
+/// 支持时间偏移的临时密码生成器
+pub struct TempPasswordGeneratorWithOffset {
+    crypto: KeeLoqCrypto,
+    time_offset: i32,
+}
+
+impl TempPasswordGeneratorWithOffset {
+    /// 创建新的带时间偏移的临时密码生成器实例
+    pub fn new(time_offset: i32) -> Self {
+        TempPasswordGeneratorWithOffset {
+            crypto: KeeLoqCrypto::new(),
+            time_offset,
+        }
+    }
+
+    /// 生成临时密码（考虑时间偏移）
+    pub fn generate(&self, admin_pwd: &str) -> Result<(String, String, String), String> {
+        // 检查管理员密码长度
+        if admin_pwd.len() < 4 {
+            return Err("管理员密码至少需要4位".to_string());
+        }
+
+        // 获取带偏移的UTC+8当前时间戳（毫秒）
+        let current_time_ms = KeeLoqCrypto::get_utc8_timestamp_with_offset(self.time_offset);
+        
+        // 转换为4秒时间窗口
+        let time_window = (current_time_ms / 4000) as u32;
+        
+        // 计算过期时间（显示给用户的是真实时间，不包含偏移）
+        let real_current_time_ms = KeeLoqCrypto::get_utc8_timestamp();
+        let real_time_window = (real_current_time_ms / 4000) as u32;
+        let expire_time_ms = (real_time_window as i64) * 4000 + 600000;
+        
+        // 使用KeeLoq加密算法生成密码
+        let encrypted_code = self.crypto.crypt_usercode(time_window, admin_pwd);
+        
+        // 添加前缀
+        let password_num = 5000000000u64 + encrypted_code.parse::<u64>().unwrap_or(0);
+        let password = password_num.to_string();
+        
+        // 格式化过期时间（显示真实时间）
+        let expire_time_str = KeeLoqCrypto::format_utc8_time(expire_time_ms);
+        
+        // 生成消息
+        let message = format!("临时密码有效期至 {}", expire_time_str);
+        
+        Ok((password, expire_time_str, message))
+    }
+
+    /// 验证临时密码是否有效（考虑时间偏移）
+    pub fn verify(&self, password: &str, admin_pwd: &str, tolerance_windows: u32) -> bool {
+        if admin_pwd.len() < 4 {
+            return false;
+        }
+
+        // 移除前缀，获取实际的加密代码
+        let password_num = match password.parse::<u64>() {
+            Ok(num) if num >= 5000000000 => num - 5000000000,
+            _ => return false,
+        };
+
+        // 使用带偏移的时间戳
+        let current_time_ms = KeeLoqCrypto::get_utc8_timestamp_with_offset(self.time_offset);
+        let current_window = (current_time_ms / 4000) as u32;
+
+        // 在容忍范围内检查时间窗口
+        for offset in 0..=tolerance_windows {
+            for &direction in &[0i32, -1i32] {
+                let check_window = if direction < 0 && offset > 0 {
+                    current_window.wrapping_sub(offset)
+                } else if direction == 0 {
+                    current_window
+                } else {
+                    continue;
+                };
+
+                let expected_code = self.crypto.crypt_usercode(check_window, admin_pwd);
+                
+                if password_num == expected_code.parse::<u64>().unwrap_or(0) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// 检查密码剩余有效时间（考虑时间偏移）
+    pub fn check_remaining_time(&self, password: &str, admin_pwd: &str) -> Option<i64> {
+        if !self.verify(password, admin_pwd, 1) {
+            return None;
+        }
+
+        // 显示的剩余时间基于真实时间
+        let current_time_ms = KeeLoqCrypto::get_utc8_timestamp();
+        let time_window = (current_time_ms / 4000) as u32;
+        let expire_time_ms = (time_window as i64) * 4000 + 600000;
+        
+        let remaining_ms = expire_time_ms - current_time_ms;
+        if remaining_ms > 0 {
+            Some(remaining_ms)
+        } else {
+            None
+        }
+    }
+}
