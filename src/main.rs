@@ -51,8 +51,22 @@ async fn main() -> Result<()> {
     log::info!("🎯 系统准备就绪，开始监听消息...");
     log::info!("📱 Bot信息: {:?}", bot.state().get_bot_info().await);
     
-    // 运行Bot (这会阻塞直到收到停止信号)
-    bot.run().await?;
+    // 同时运行Bot和信号处理器，实现优雅关闭
+    tokio::select! {
+        result = bot.run() => {
+            if let Err(e) = result {
+                log::error!("Bot运行错误: {}", e);
+                return Err(e);
+            }
+        }
+        result = setup_signal_handlers() => {
+            if let Err(e) = result {
+                log::error!("信号处理器错误: {}", e);
+                return Err(e);
+            }
+            log::info!("收到停止信号，正在优雅关闭...");
+        }
+    }
 
     log::info!("👋 NekoHouse V3 访客登记系统已停止");
     Ok(())
