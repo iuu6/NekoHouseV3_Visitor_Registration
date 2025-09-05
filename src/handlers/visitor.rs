@@ -1,12 +1,11 @@
 //! 访客命令处理器
 
-use crate::auth::PasswordService;
 use crate::bot::bot::BotState;
-use crate::database::{AdminRepository, RecordRepository};
+use crate::database::RecordRepository;
 use crate::error::Result;
 use crate::handlers::start::{get_user_display_name, validate_user_input};
 use crate::types::{AuthStatus, AuthType, CallbackData, PasswordRequest, Record, UserRole};
-use chrono::Utc;
+use chrono::{Datelike, Timelike, Utc};
 use teloxide::{
     prelude::*,
     types::{InlineKeyboardButton, InlineKeyboardMarkup},
@@ -86,7 +85,7 @@ pub async fn req_command(
     // 发送确认消息给访客
     let visitor_message = format!(
         "✅ 邀请码验证通过！\n\n\
-         👤 邀请您的管理员ID：{}\n\
+         👤 邀请管理员：ID {} \n\
          📝 管理员已经收到了您的请求～请您等待批准！\n\n\
          🆔 您的申请ID：{}\n\
          ⏰ 申请时间：{}\n\n\
@@ -202,7 +201,7 @@ async fn handle_admin_get_password(
         Ok(result) => {
             let message = format!(
                 "🔑 管理员临时密码\n\n\
-                 密码：`{}`\n\
+                 密码：<code>{}</code>\n\
                  过期时间：{}\n\
                  类型：{}\n\n\
                  💡 {}",
@@ -213,7 +212,7 @@ async fn handle_admin_get_password(
             );
 
             bot.send_message(msg.chat.id, message)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .parse_mode(teloxide::types::ParseMode::Html)
                 .await?;
         }
         Err(e) => {
@@ -252,20 +251,77 @@ async fn generate_password_for_record(
             }
             password_service.mark_longtime_temp_generated(record.vis_id);
         }
-        _ => {}
+        _ => {
+            // 对于其他类型，检查是否已经生成过密码
+            let password_service = state.password_service.read().await;
+            if let Some(existing_password) = password_service.has_generated_password(record.unique_id) {
+                // 已经生成过密码，直接返回
+                let type_description = match record.auth_type {
+                    AuthType::Limited => "时效密码",
+                    AuthType::Period => "指定过期时间密码",
+                    AuthType::Times => "次数密码",
+                    AuthType::Temp => "临时密码",
+                    AuthType::LongtimeTemp => "长期临时密码",
+                };
+
+                let message = format!(
+                    "🔑 您的访问密码\n\n\
+                     密码：<code>{}</code>\n\
+                     类型：{}\n\
+                     过期时间：{}\n\n\
+                     💡 此密码已生成，请妥善保管\n\n\
+                     ⚠️ 请在有效期内使用，过期后需重新获取",
+                    existing_password,
+                    type_description,
+                    record.ended_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or("未设置".to_string())
+                );
+
+                bot.send_message(chat_id, message)
+                    .parse_mode(teloxide::types::ParseMode::Html)
+                    .await?;
+                return Ok(());
+            }
+        }
     }
+
+    // 根据授权类型构建密码请求参数
+    let (hours, minutes, end_year, end_month, end_day, end_hour) = match record.auth_type {
+        AuthType::Limited => {
+            // 从开始时间和结束时间计算小时数
+            if let (Some(start), Some(end)) = (record.start_time, record.ended_time) {
+                let duration = end.signed_duration_since(start);
+                let total_minutes = duration.num_minutes();
+                let hours = (total_minutes / 60) as u32;
+                let minutes = (total_minutes % 60) as u32;
+                (Some(hours), Some(minutes), None, None, None, None)
+            } else {
+                // 默认2小时
+                (Some(2), Some(0), None, None, None, None)
+            }
+        },
+        AuthType::Period => {
+            // 从结束时间提取年月日时
+            if let Some(end) = record.ended_time {
+                (None, None, Some(end.year() as u32), Some(end.month()), Some(end.day()), Some(end.hour()))
+            } else {
+                return Err(crate::error::AppError::business("周期密码缺少结束时间"));
+            }
+        },
+        _ => (None, None, None, None, None, None)
+    };
 
     // 构建密码请求
     let password_request = PasswordRequest {
         admin_password,
         auth_type: record.auth_type,
         times: record.times.map(|t| t as u32),
-        hours: None, // 根据记录类型设置
-        minutes: None,
-        end_year: None,
-        end_month: None,
-        end_day: None,
-        end_hour: None,
+        hours,
+        minutes,
+        end_year,
+        end_month,
+        end_day,
+        end_hour,
         start_time: record.start_time,
     };
 
@@ -284,7 +340,7 @@ async fn generate_password_for_record(
 
     let message = format!(
         "🔑 您的访问密码\n\n\
-         密码：`{}`\n\
+         密码：<code>{}</code>\n\
          类型：{}\n\
          过期时间：{}\n\n\
          💡 {}\n\n\
@@ -296,7 +352,7 @@ async fn generate_password_for_record(
     );
 
     bot.send_message(chat_id, message)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .parse_mode(teloxide::types::ParseMode::Html)
         .await?;
 
     // 将密码添加到记录中
@@ -304,7 +360,79 @@ async fn generate_password_for_record(
     RecordRepository::add_password(&mut tx, record.unique_id, &result.password).await?;
     tx.commit().await?;
 
+    // 对于非longtimetemp类型，缓存生成的密码
+    if record.auth_type != AuthType::LongtimeTemp {
+        let mut password_service = state.password_service.write().await;
+        password_service.mark_password_generated(record.unique_id, result.password.clone());
+    }
+
     Ok(())
+}
+
+/// 生成并发送密码（用于批准后立即推送）
+pub async fn generate_and_send_password(
+    _bot: &Bot,
+    _chat_id: ChatId,
+    record: &Record,
+    state: &BotState,
+) -> Result<String> {
+    let user_service = state.user_service.read().await;
+    let admin = user_service.get_admin_info_by_unique_id(record.inviter).await?
+        .ok_or_else(|| crate::error::AppError::business("管理员信息不存在"))?;
+
+    let admin_password = admin.password
+        .ok_or_else(|| crate::error::AppError::business("管理员未设置密码"))?;
+
+    // 根据授权类型构建密码请求参数
+    let (hours, minutes, end_year, end_month, end_day, end_hour) = match record.auth_type {
+        AuthType::Limited => {
+            // 从开始时间和结束时间计算小时数
+            if let (Some(start), Some(end)) = (record.start_time, record.ended_time) {
+                let duration = end.signed_duration_since(start);
+                let total_minutes = duration.num_minutes();
+                let hours = (total_minutes / 60) as u32;
+                let minutes = (total_minutes % 60) as u32;
+                (Some(hours), Some(minutes), None, None, None, None)
+            } else {
+                // 默认2小时
+                (Some(2), Some(0), None, None, None, None)
+            }
+        },
+        AuthType::Period => {
+            // 从结束时间提取年月日时
+            if let Some(end) = record.ended_time {
+                (None, None, Some(end.year() as u32), Some(end.month()), Some(end.day()), Some(end.hour()))
+            } else {
+                return Err(crate::error::AppError::business("周期密码缺少结束时间"));
+            }
+        },
+        _ => (None, None, None, None, None, None)
+    };
+
+    // 构建密码请求
+    let password_request = PasswordRequest {
+        admin_password,
+        auth_type: record.auth_type,
+        times: record.times.map(|t| t as u32),
+        hours,
+        minutes,
+        end_year,
+        end_month,
+        end_day,
+        end_hour,
+        start_time: record.start_time,
+    };
+
+    // 生成密码
+    let mut password_service = state.password_service.write().await;
+    let result = password_service.generate_password(&password_request, &state.config)?;
+
+    // 将密码添加到记录中
+    let mut tx = state.database.begin_transaction().await?;
+    RecordRepository::add_password(&mut tx, record.unique_id, &result.password).await?;
+    tx.commit().await?;
+
+    Ok(result.password)
 }
 
 /// 发送审批请求给管理员
@@ -313,7 +441,7 @@ async fn send_approval_request_to_admin(
     admin: &crate::types::Admin,
     visitor: &teloxide::types::User,
     record_id: i64,
-    state: &BotState,
+    _state: &BotState,
 ) -> Result<()> {
     let visitor_name = get_user_display_name(visitor);
     let current_time = Utc::now().format("%Y-%m-%d %H:%M:%S");
@@ -334,11 +462,11 @@ async fn send_approval_request_to_admin(
 
     let message = format!(
         "📋 新的访客授权请求\n\n\
-         👤 用户：{}\n\
+         👤 访客：{}\n\
          🆔 用户ID：{}\n\
          🕐 申请时间：{}\n\
          📝 记录ID：{}\n\n\
-         请您仔细核验后批准",
+         ✅ 请您仔细核验访客身份后选择批准或拒绝",
         visitor_name,
         visitor.id.0,
         current_time,

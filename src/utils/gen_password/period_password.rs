@@ -482,7 +482,7 @@ impl PeriodPasswordGeneratorWithOffset {
 
         // 获取带偏移的当前UTC+8时间
         let current_time_ms = KeeLoqCrypto::get_utc8_timestamp_with_offset(self.time_offset);
-        let current_datetime = DateTime::from_timestamp_millis(current_time_ms)
+        let _current_datetime = DateTime::from_timestamp_millis(current_time_ms)
             .unwrap()
             .with_timezone(&beijing_tz);
 

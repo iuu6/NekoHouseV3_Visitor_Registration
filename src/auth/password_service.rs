@@ -5,24 +5,26 @@ use crate::error::{AppError, Result};
 use crate::types::{AuthType, PasswordRequest};
 use crate::utils::gen_password::{
     UnifiedPasswordGenerator, PasswordType, PasswordResult,
-    generate_password, verify_password, get_password_remaining_time,
 };
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 /// 密码服务
 pub struct PasswordService {
-    generator: UnifiedPasswordGenerator,
+    _generator: UnifiedPasswordGenerator,
     /// 用于跟踪长期临时密码的最后生成时间
     longtime_temp_cache: HashMap<i64, DateTime<Utc>>,
+    /// 用于跟踪已生成密码的记录ID（除longtimetemp外只生成一次）
+    generated_passwords_cache: HashMap<i64, String>,
 }
 
 impl PasswordService {
     /// 创建新的密码服务实例
     pub fn new() -> Self {
         Self {
-            generator: UnifiedPasswordGenerator::new(),
+            _generator: UnifiedPasswordGenerator::new(),
             longtime_temp_cache: HashMap::new(),
+            generated_passwords_cache: HashMap::new(),
         }
     }
 
@@ -86,6 +88,27 @@ impl PasswordService {
             let elapsed = now.signed_duration_since(*last_time);
             elapsed.num_minutes() < 60 // 保留1小时内的记录
         });
+    }
+
+    /// 检查记录是否已生成过密码（除longtimetemp外）
+    pub fn has_generated_password(&self, record_id: i64) -> Option<&String> {
+        self.generated_passwords_cache.get(&record_id)
+    }
+
+    /// 标记记录已生成密码
+    pub fn mark_password_generated(&mut self, record_id: i64, password: String) {
+        self.generated_passwords_cache.insert(record_id, password);
+    }
+
+    /// 清理已生成密码缓存
+    pub fn cleanup_generated_passwords_cache(&mut self) {
+        // 保留最近1000个记录
+        if self.generated_passwords_cache.len() > 1000 {
+            let mut entries: Vec<_> = self.generated_passwords_cache.drain().collect();
+            entries.sort_by_key(|&(k, _)| k);
+            entries.truncate(1000);
+            self.generated_passwords_cache = entries.into_iter().collect();
+        }
     }
 
     /// 生成临时密码（10分钟有效）

@@ -329,7 +329,7 @@ impl TimesPasswordGeneratorWithOffset {
         time_window &= 0xFFFFFFE0;
         
         // 计算时间戳
-        let timestamp = (time_window as u64) * 4000;
+        let _timestamp = (time_window as u64) * 4000;
         
         // 计算过期时间（显示给用户的是真实时间）
         let real_current_time_ms = KeeLoqCrypto::get_utc8_timestamp();

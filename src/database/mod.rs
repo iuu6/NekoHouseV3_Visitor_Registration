@@ -7,7 +7,7 @@ pub mod record;
 pub use admin::AdminRepository;
 pub use record::RecordRepository;
 
-use crate::error::{AppError, Result};
+use crate::error::Result;
 use sqlx::{sqlite::SqlitePool, Pool, Sqlite};
 use std::path::Path;
 

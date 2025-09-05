@@ -2,7 +2,7 @@
 
 use nekohouse_v3_visitor_registration::{
     bot::NekoHouseBot,
-    config::{AppConfig, ConfigManager},
+    config::ConfigManager,
     error::Result,
 };
 use std::env;

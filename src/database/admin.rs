@@ -2,7 +2,7 @@
 
 use crate::error::{AppError, Result};
 use crate::types::Admin;
-use chrono::{DateTime, Utc};
+
 use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
 

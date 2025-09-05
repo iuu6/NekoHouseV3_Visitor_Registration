@@ -1,10 +1,10 @@
 //! 管理员命令处理器
 
 use crate::bot::bot::BotState;
-use crate::database::{AdminRepository, RecordRepository};
-use crate::error::{AppError, Result};
+use crate::database::RecordRepository;
+use crate::error::Result;
 use crate::handlers::start::{get_user_display_name, validate_user_input};
-use crate::types::{AuthStatus, AuthType, CallbackData, UserRole};
+use crate::types::{AuthStatus, CallbackData};
 use teloxide::{
     prelude::*,
     types::{InlineKeyboardButton, InlineKeyboardMarkup},
@@ -63,15 +63,18 @@ pub async fn add_admin_command(
     // 尝试添加管理员
     match user_service.create_admin(operator_id, user_id).await {
         Ok(admin_unique_id) => {
+            let operator_name = get_user_display_name(operator);
             let response = format!(
                 "✅ 成功添加管理员！\n\n\
-                 👤 目标用户ID: {}\n\
-                 🆔 管理员数据库ID: {}\n\n\
-                 💡 新管理员需要：\n\
+                 👤 新管理员用户ID：{}\n\
+                 🆔 管理员数据库ID：{}\n\
+                 👨‍💼 操作员：{}\n\n\
+                 💡 新管理员需要完成以下步骤：\n\
                  1. 发送 /start 激活账户\n\
                  2. 使用 /editpasswd <密码> 设置管理密码\n\
-                 3. 使用 /geninvite 生成邀请码",
-                user_id, admin_unique_id
+                 3. 使用 /geninvite 生成邀请码\n\n\
+                 🔔 请通知新管理员完成账户设置",
+                user_id, admin_unique_id, operator_name
             );
             bot.send_message(msg.chat.id, response).await?;
             log::info!("超级管理员 {} 成功添加管理员 {}", operator_id, user_id);
@@ -214,7 +217,7 @@ pub async fn gen_invite_command(bot: Bot, msg: Message, state: BotState) -> Resu
         ]);
 
         let message = format!(
-            "🎫 您当前的邀请码：\n`{}`\n\n\
+            "🎫 您当前的邀请码：\n<code>{}</code>\n\n\
              ⚠️ 是否要生成新的邀请码？\n\
              注意：原邀请码将失效！",
             existing_code
@@ -222,7 +225,7 @@ pub async fn gen_invite_command(bot: Bot, msg: Message, state: BotState) -> Resu
 
         bot.send_message(msg.chat.id, message)
             .reply_markup(keyboard)
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .parse_mode(teloxide::types::ParseMode::Html)
             .await?;
     } else {
         // 第一次生成邀请码
@@ -324,10 +327,27 @@ pub async fn revoke_command(
     };
 
     // 发送结果消息
+    let operator_name = get_user_display_name(user);
     let result_msg = if revoked_count > 0 {
-        format!("✅ 成功撤销 {} 条授权记录", revoked_count)
+        format!(
+            "✅ 授权撤销成功\n\n\
+             📊 撤销统计：{} 条记录\n\
+             🎯 撤销目标：{}\n\
+             👨‍💼 操作员：{}\n\
+             ⏰ 操作时间：{}",
+            revoked_count,
+            target,
+            operator_name,
+            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
+        )
     } else {
-        "❌ 没有找到可撤销的授权记录".to_string()
+        format!(
+            "❌ 撤销失败\n\n\
+             🎯 目标：{}\n\
+             📝 原因：没有找到可撤销的授权记录\n\
+             👨‍💼 操作员：{}",
+            target, operator_name
+        )
     };
 
     bot.send_message(msg.chat.id, result_msg).await?;
@@ -347,7 +367,7 @@ async fn generate_new_invite_code(
         Ok(invite_code) => {
             let message = format!(
                 "✅ 邀请码生成成功！\n\n\
-                 🎫 您的邀请码：\n`{}`\n\n\
+                 🎫 您的邀请码：\n<code>{}</code>\n\n\
                  📋 使用方法：\n\
                  访客使用命令 /req {} 申请授权\n\n\
                  💡 提示：请妥善保管邀请码",
@@ -355,7 +375,7 @@ async fn generate_new_invite_code(
             );
 
             bot.send_message(chat_id, message)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .parse_mode(teloxide::types::ParseMode::Html)
                 .await?;
         }
         Err(e) => {

@@ -3,7 +3,7 @@
 use crate::auth::{PasswordService, UserService};
 use crate::config::AppConfig;
 use crate::database::Database;
-use crate::error::{AppError, Result};
+use crate::error::Result;
 use std::sync::Arc;
 use teloxide::{
     prelude::*,
@@ -112,8 +112,6 @@ impl NekoHouseBot {
 
     /// 创建消息处理器
     fn create_handler(&self) -> UpdateHandler<crate::error::AppError> {
-        use dptree::case;
-        use teloxide::utils::command::BotCommands;
 
         dptree::entry()
             .branch(

@@ -163,16 +163,47 @@ async fn handle_auth_temp_selection(
     tx.commit().await?;
 
     if success {
-        // 通知访客
+        // 立即为临时密码生成密码并推送给访客
         if let Some(record) = RecordRepository::find_by_id(state.database.pool(), record_id).await? {
             let visitor_chat_id = ChatId(record.vis_id);
-            bot.send_message(
-                visitor_chat_id,
-                "✅ 您的授权已被批准！\n\n\
-                 📋 授权类型：临时密码\n\
-                 ⏰ 有效期：10分钟\n\n\
-                 使用 /getpassword 获取密码"
-            ).await.ok();
+            
+            // 生成并推送密码
+            match crate::handlers::visitor::generate_and_send_password(&bot, visitor_chat_id, &record, &state).await {
+                Ok(password) => {
+                    bot.send_message(
+                        visitor_chat_id,
+                        format!(
+                            "✅ 您的授权已被批准！\n\n\
+                             📋 授权类型：临时密码\n\
+                             ⏰ 有效期：10分钟\n\
+                             🆔 批准ID：{}\n\
+                             📅 过期时间：{}\n\
+                             🔑 密码：<code>{}</code>\n\n\
+                             💡 密码已自动生成，请妥善保管",
+                             record_id,
+                             record.ended_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                                 .unwrap_or("未设置".to_string()),
+                             password
+                        )
+                    ).parse_mode(teloxide::types::ParseMode::Html).await.ok();
+                }
+                Err(_) => {
+                    bot.send_message(
+                        visitor_chat_id,
+                        format!(
+                            "✅ 您的授权已被批准！\n\n\
+                             📋 授权类型：临时密码\n\
+                             ⏰ 有效期：10分钟\n\
+                             🆔 批准ID：{}\n\
+                             📅 过期时间：{}\n\n\
+                             使用 /getpassword 获取密码",
+                             record_id,
+                             record.ended_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                                 .unwrap_or("未设置".to_string())
+                        )
+                    ).await.ok();
+                }
+            }
         }
 
         // 更新管理员消息
@@ -181,7 +212,9 @@ async fn handle_auth_temp_selection(
                 "✅ 授权已批准\n\n\
                  📋 授权类型：临时密码\n\
                  ⏰ 有效期：10分钟\n\
+                 🆔 记录ID：{}\n\
                  🕐 处理时间：{}",
+                record_id,
                 Utc::now().format("%Y-%m-%d %H:%M:%S")
             );
 
@@ -294,20 +327,20 @@ async fn handle_auth_limited_selection(
 async fn handle_auth_period_selection(
     bot: Bot,
     callback: CallbackQuery,
-    record_id: i64,
+    _record_id: i64,
     _state: BotState,
 ) -> Result<()> {
     if let Some(message) = callback.message {
         bot.edit_message_text(
             message.chat.id,
             message.id,
-            "📅 指定过期时间密码需要管理员输入具体时间\n\n\
+            format!("📅 指定过期时间密码需要管理员输入具体时间\n\n\
              请发送消息格式：\n\
-             `期间 {} YYYY-MM-DD HH`\n\n\
-             例如：`期间 {} 2024-12-25 18`\n\
-             (表示2024年12月25日18点过期)"
+             <code>期间 {} YYYY-MM-DD HH</code>\n\n\
+             例如：<code>期间 {} 2024-12-25 18</code>\n\
+             (表示2024年12月25日18点过期)", _record_id, _record_id)
         )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .parse_mode(teloxide::types::ParseMode::Html)
         .await?;
     }
 
@@ -319,20 +352,20 @@ async fn handle_auth_period_selection(
 async fn handle_auth_longtime_temp_selection(
     bot: Bot,
     callback: CallbackQuery,
-    record_id: i64,
+    _record_id: i64,
     _state: BotState,
 ) -> Result<()> {
     if let Some(message) = callback.message {
         bot.edit_message_text(
             message.chat.id,
             message.id,
-            "🔄 长期临时密码需要管理员指定结束时间\n\n\
+            format!("🔄 长期临时密码需要管理员指定结束时间\n\n\
              请发送消息格式：\n\
-             `长期 {} YYYY-MM-DD HH:MM`\n\n\
-             例如：`长期 {} 2024-12-31 23:59`\n\
-             (表示在此时间前可重复获取临时密码)"
+             <code>长期 {} YYYY-MM-DD HH:MM</code>\n\n\
+             例如：<code>长期 {} 2024-12-31 23:59</code>\n\
+             (表示在此时间前可重复获取临时密码)", _record_id, _record_id)
         )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .parse_mode(teloxide::types::ParseMode::Html)
         .await?;
     }
 
@@ -345,22 +378,54 @@ async fn handle_back_to_approve(
     bot: Bot,
     callback: CallbackQuery,
     record_id: i64,
-    _state: BotState,
+    state: BotState,
 ) -> Result<()> {
-    // 重新创建授权类型选择键盘
-    let keyboard = crate::handlers::visitor::create_auth_type_keyboard(record_id);
+    // 获取记录信息以显示用户详情
+    let record = RecordRepository::find_by_id(state.database.pool(), record_id).await?
+        .ok_or_else(|| crate::error::AppError::business("授权记录不存在"))?;
 
-    if let Some(message) = callback.message {
-        bot.edit_message_text(
-            message.chat.id,
-            message.id,
-            "✅ 请选择授权类型："
-        )
+    // 获取用户服务以查找管理员信息
+    let user_service = state.user_service.read().await;
+    let admin = user_service.get_admin_info_by_unique_id(record.inviter).await?
+        .ok_or_else(|| crate::error::AppError::business("管理员信息不存在"))?;
+
+    // 创建原始的批准/拒绝键盘
+    let keyboard = InlineKeyboardMarkup::new(vec![
+        vec![
+            InlineKeyboardButton::callback(
+                "✅ 批准",
+                CallbackData::with_data("approve", &record_id.to_string()).to_callback_string().unwrap()
+            ),
+            InlineKeyboardButton::callback(
+                "❌ 拒绝",
+                CallbackData::with_data("reject", &record_id.to_string()).to_callback_string().unwrap()
+            ),
+        ]
+    ]);
+
+    // 重新显示原始的批准请求消息
+    let message = format!(
+        "📋 访客授权请求\n\n\
+         👤 用户ID：{}\n\
+         🕐 申请时间：{}\n\
+         📝 记录ID：{}\n\
+         👨‍💼 管理员ID：{}\n\n\
+         请您仔细核验后批准",
+        record.vis_id,
+        record.update_at.format("%Y-%m-%d %H:%M:%S"),
+        record_id,
+        admin.id
+    );
+
+    if let Some(message_to_edit) = callback.message {
+        bot.edit_message_text(message_to_edit.chat.id, message_to_edit.id, message)
         .reply_markup(keyboard)
         .await?;
     }
 
-    bot.answer_callback_query(callback.id).await?;
+    bot.answer_callback_query(callback.id)
+        .text("↩️ 已返回批准选择")
+        .await?;
     Ok(())
 }
 
@@ -400,20 +465,51 @@ pub async fn handle_confirm_times_callback(
     tx.commit().await?;
 
     if success {
-        // 通知访客
+        // 立即为次数密码生成密码并推送给访客
         if let Some(record) = RecordRepository::find_by_id(state.database.pool(), record_id).await? {
             let visitor_chat_id = ChatId(record.vis_id);
-            bot.send_message(
-                visitor_chat_id,
-                format!(
-                    "✅ 您的授权已被批准！\n\n\
-                     📋 授权类型：次数密码\n\
-                     🔢 可用次数：{} 次\n\
-                     ⏰ 有效期：2小时\n\n\
-                     使用 /getpassword 获取密码",
-                    times
-                )
-            ).await.ok();
+            
+            // 生成并推送密码
+            match crate::handlers::visitor::generate_and_send_password(&bot, visitor_chat_id, &record, &state).await {
+                Ok(password) => {
+                    bot.send_message(
+                        visitor_chat_id,
+                        format!(
+                            "✅ 您的授权已被批准！\n\n\
+                             📋 授权类型：次数密码\n\
+                             🔢 可用次数：{} 次\n\
+                             ⏰ 有效期：2小时\n\
+                             🆔 批准ID：{}\n\
+                             📅 过期时间：{}\n\
+                             🔑 密码：<code>{}</code>\n\n\
+                             💡 密码已自动生成，请妥善保管",
+                             times,
+                             record_id,
+                             record.ended_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                                 .unwrap_or("未设置".to_string()),
+                             password
+                        )
+                    ).parse_mode(teloxide::types::ParseMode::Html).await.ok();
+                }
+                Err(_) => {
+                    bot.send_message(
+                        visitor_chat_id,
+                        format!(
+                            "✅ 您的授权已被批准！\n\n\
+                             📋 授权类型：次数密码\n\
+                             🔢 可用次数：{} 次\n\
+                             ⏰ 有效期：2小时\n\
+                             🆔 批准ID：{}\n\
+                             📅 过期时间：{}\n\n\
+                             使用 /getpassword 获取密码",
+                             times,
+                             record_id,
+                             record.ended_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                                 .unwrap_or("未设置".to_string())
+                        )
+                    ).await.ok();
+                }
+            }
         }
 
         // 更新管理员消息
@@ -423,8 +519,10 @@ pub async fn handle_confirm_times_callback(
                  📋 授权类型：次数密码\n\
                  🔢 使用次数：{} 次\n\
                  ⏰ 有效期：2小时\n\
+                 🆔 记录ID：{}\n\
                  🕐 处理时间：{}",
                 times,
+                record_id,
                 Utc::now().format("%Y-%m-%d %H:%M:%S")
             );
 
@@ -474,21 +572,47 @@ pub async fn handle_confirm_limited_callback(
             format!("{}小时{}分钟", hours, minutes)
         };
 
-        // 通知访客
+        // 立即为时效密码生成密码并推送给访客
         if let Some(record) = RecordRepository::find_by_id(state.database.pool(), record_id).await? {
             let visitor_chat_id = ChatId(record.vis_id);
-            bot.send_message(
-                visitor_chat_id,
-                format!(
-                    "✅ 您的授权已被批准！\n\n\
-                     📋 授权类型：时效密码\n\
-                     ⏰ 有效时长：{}\n\
-                     📅 过期时间：{}\n\n\
-                     使用 /getpassword 获取密码",
-                    duration_str,
-                    end_time.unwrap().format("%Y-%m-%d %H:%M:%S")
-                )
-            ).await.ok();
+            
+            // 生成并推送密码
+            match crate::handlers::visitor::generate_and_send_password(&bot, visitor_chat_id, &record, &state).await {
+                Ok(password) => {
+                    bot.send_message(
+                        visitor_chat_id,
+                        format!(
+                            "✅ 您的授权已被批准！\n\n\
+                             📋 授权类型：时效密码\n\
+                             ⏰ 有效时长：{}\n\
+                             📅 过期时间：{}\n\
+                             🆔 批准ID：{}\n\
+                             🔑 密码：<code>{}</code>\n\n\
+                             💡 密码已自动生成，请妥善保管",
+                             duration_str,
+                             end_time.unwrap().format("%Y-%m-%d %H:%M:%S"),
+                             record_id,
+                             password
+                        )
+                    ).parse_mode(teloxide::types::ParseMode::Html).await.ok();
+                }
+                Err(_) => {
+                    bot.send_message(
+                        visitor_chat_id,
+                        format!(
+                            "✅ 您的授权已被批准！\n\n\
+                             📋 授权类型：时效密码\n\
+                             ⏰ 有效时长：{}\n\
+                             📅 过期时间：{}\n\
+                             🆔 批准ID：{}\n\n\
+                             使用 /getpassword 获取密码",
+                             duration_str,
+                             end_time.unwrap().format("%Y-%m-%d %H:%M:%S"),
+                             record_id
+                        )
+                    ).await.ok();
+                }
+            }
         }
 
         // 更新管理员消息
@@ -498,9 +622,11 @@ pub async fn handle_confirm_limited_callback(
                  📋 授权类型：时效密码\n\
                  ⏰ 有效时长：{}\n\
                  📅 过期时间：{}\n\
+                 🆔 记录ID：{}\n\
                  🕐 处理时间：{}",
                 duration_str,
                 end_time.unwrap().format("%Y-%m-%d %H:%M:%S"),
+                record_id,
                 Utc::now().format("%Y-%m-%d %H:%M:%S")
             );
 
