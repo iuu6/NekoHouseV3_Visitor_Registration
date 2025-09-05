@@ -33,7 +33,7 @@
 
 1. **克隆项目**
 ```bash
-git clone https://github.com/your-repo/NekoHouseV3_Visitor_Registration.git
+git clone https://github.com/iuu6/NekoHouseV3_Visitor_Registration.git
 cd NekoHouseV3_Visitor_Registration
 ```
 
@@ -241,7 +241,7 @@ export CONFIG_PATH=/path/to/your/config.json
 
 ## 🛠️ 技术栈
 
-- **语言**：Rust 2021 Edition
+- **语言**：Rust
 - **异步运行时**：Tokio
 - **Telegram Bot**：Teloxide
 - **数据库**：SQLite + SQLx
@@ -265,13 +265,9 @@ export CONFIG_PATH=/path/to/your/config.json
 4. 推送分支：`git push origin feature/amazing-feature`
 5. 提交Pull Request
 
-## 📜 许可证
-
-本项目采用MIT许可证 - 详见 [LICENSE](LICENSE) 文件
-
 ## 🐛 问题反馈
 
-如果您发现任何问题或有功能建议，请提交 [Issue](https://github.com/your-repo/NekoHouseV3_Visitor_Registration/issues)
+如果您发现任何问题或有功能建议，请提交 [Issue](https://github.com/iuu6/NekoHouseV3_Visitor_Registration/issues)
 
 ## 📞 支持
 
