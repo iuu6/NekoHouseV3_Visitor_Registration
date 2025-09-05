@@ -86,11 +86,12 @@ impl RecordRepository {
         pool: &sqlx::Pool<Sqlite>,
         vis_id: i64,
     ) -> Result<Vec<Record>> {
+        // 获取所有状态为'auth'的记录，在应用层判断是否过期
         let rows = sqlx::query(
             r#"
             SELECT unique_id, status, vis_id, type, times, start_time, ended_time, password, inviter, update_at
             FROM record
-            WHERE vis_id = ? AND status = 'auth' AND (ended_time IS NULL OR ended_time > CURRENT_TIMESTAMP)
+            WHERE vis_id = ? AND status = 'auth'
             ORDER BY update_at DESC
             "#,
         )
@@ -98,12 +99,42 @@ impl RecordRepository {
         .fetch_all(pool)
         .await?;
 
-        let mut records = Vec::new();
+        let mut expired_ids = Vec::new();
+        let mut active_records = Vec::new();
+
+        // 在应用层检查每个记录是否真正活跃
         for row in rows {
-            records.push(Self::row_to_record(row)?);
+            let record = Self::row_to_record(row)?;
+            if record.is_active() {
+                active_records.push(record);
+            } else {
+                // 记录已过期，标记为需要清理
+                expired_ids.push(record.unique_id);
+            }
         }
 
-        Ok(records)
+        // 批量清理过期的记录
+        if !expired_ids.is_empty() {
+            let expired_count = expired_ids.len();
+            let mut tx = pool.begin().await?;
+            for expired_id in expired_ids {
+                sqlx::query(
+                    r#"
+                    UPDATE record
+                    SET status = 'revoked', update_at = ?
+                    WHERE unique_id = ?
+                    "#,
+                )
+                .bind(Utc::now())
+                .bind(expired_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            tx.commit().await?;
+            log::info!("为用户 {} 清理了 {} 个过期授权", vis_id, expired_count);
+        }
+
+        Ok(active_records)
     }
 
     /// 查找管理员的所有记录
@@ -283,23 +314,78 @@ impl RecordRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    /// 清理用户的过期授权
+    pub async fn cleanup_expired_authorizations(
+        tx: &mut Transaction<'_, Sqlite>,
+        vis_id: i64,
+    ) -> Result<usize> {
+        let result = sqlx::query(
+            r#"
+            UPDATE record
+            SET status = 'revoked', update_at = CURRENT_TIMESTAMP
+            WHERE vis_id = ? AND status = 'auth' AND ended_time IS NOT NULL AND ended_time <= CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(vis_id)
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(result.rows_affected() as usize)
+    }
+
     /// 检查用户是否有活跃授权
     pub async fn has_active_authorization(
         pool: &sqlx::Pool<Sqlite>,
         vis_id: i64,
     ) -> Result<bool> {
-        let result = sqlx::query(
+        // 获取所有状态为'auth'的记录，在应用层判断是否过期
+        let rows = sqlx::query(
             r#"
-            SELECT 1 FROM record
-            WHERE vis_id = ? AND status = 'auth' AND (ended_time IS NULL OR ended_time > CURRENT_TIMESTAMP)
-            LIMIT 1
+            SELECT unique_id, status, vis_id, type, times, start_time, ended_time, password, inviter, update_at
+            FROM record
+            WHERE vis_id = ? AND status = 'auth'
             "#,
         )
         .bind(vis_id)
-        .fetch_optional(pool)
+        .fetch_all(pool)
         .await?;
 
-        Ok(result.is_some())
+        let mut expired_ids = Vec::new();
+        let mut has_active = false;
+
+        // 在应用层检查每个记录是否真正活跃
+        for row in rows {
+            let record = Self::row_to_record(row)?;
+            if record.is_active() {
+                has_active = true;
+            } else {
+                // 记录已过期，标记为需要清理
+                expired_ids.push(record.unique_id);
+            }
+        }
+
+        // 批量清理过期的记录
+        if !expired_ids.is_empty() {
+            let expired_count = expired_ids.len();
+            let mut tx = pool.begin().await?;
+            for expired_id in expired_ids {
+                sqlx::query(
+                    r#"
+                    UPDATE record
+                    SET status = 'revoked', update_at = ?
+                    WHERE unique_id = ?
+                    "#,
+                )
+                .bind(Utc::now())
+                .bind(expired_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            tx.commit().await?;
+            log::info!("为用户 {} 清理了 {} 个过期授权", vis_id, expired_count);
+        }
+
+        Ok(has_active)
     }
 
     /// 检查用户是否有待处理请求

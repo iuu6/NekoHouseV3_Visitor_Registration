@@ -112,7 +112,6 @@ impl NekoHouseBot {
 
     /// 创建消息处理器
     fn create_handler(&self) -> UpdateHandler<crate::error::AppError> {
-
         dptree::entry()
             .branch(
                 Update::filter_message()
@@ -121,7 +120,15 @@ impl NekoHouseBot {
             )
             .branch(
                 Update::filter_message()
-                    .filter(|msg: Message| msg.text().is_some())
+                    .filter(|msg: Message| {
+                        if let Some(text) = msg.text() {
+                            log::debug!("收到非命令文本消息: {} from user {:?}",
+                                text, msg.from().map(|u| u.id.0));
+                            true
+                        } else {
+                            false
+                        }
+                    })
                     .endpoint(crate::handlers::handle_text)
             )
             .branch(
@@ -156,7 +163,14 @@ async fn handle_command(
     cmd: Command,
     state: BotState,
 ) -> Result<()> {
-    match cmd {
+    let user_id = msg.from().map(|u| u.id.0 as i64).unwrap_or(0);
+    let chat_id = msg.chat.id;
+    log::info!("处理命令: {:?} from user {}", cmd, user_id);
+    
+    // Clone bot for error handling
+    let bot_clone = bot.clone();
+    
+    let result = match cmd.clone() {
         Command::Start => crate::handlers::start_command(bot, msg, cmd, state).await,
         Command::AddAdmin(_) => crate::handlers::add_admin_command(bot, msg, cmd, state).await,
         Command::EditPassword(_) => crate::handlers::edit_password_command(bot, msg, cmd, state).await,
@@ -164,11 +178,20 @@ async fn handle_command(
         Command::Revoke(_) => crate::handlers::revoke_command(bot, msg, cmd, state).await,
         Command::Req(_) => crate::handlers::req_command(bot, msg, cmd, state).await,
         Command::GetPassword => crate::handlers::get_password_command(bot, msg, state).await,
+    };
+    
+    if let Err(e) = &result {
+        log::error!("命令处理错误: {} for user {}", e, user_id);
+        // 发送错误消息给用户，但不要阻塞系统
+        let _ = bot_clone.send_message(chat_id,
+            format!("❌ 处理命令时发生错误: {}", e)).await;
     }
+    
+    result
 }
 
 /// Bot命令枚举
-#[derive(BotCommands, Clone)]
+#[derive(BotCommands, Clone, Debug)]
 #[command(rename_rule = "lowercase")]
 pub enum Command {
     /// 开始使用Bot

@@ -5,11 +5,22 @@ use crate::database::RecordRepository;
 use crate::error::Result;
 use crate::handlers::start::{get_user_display_name, validate_user_input};
 use crate::types::{AuthStatus, AuthType, CallbackData, PasswordRequest, Record, UserRole};
-use chrono::{Datelike, Timelike, Utc};
+use chrono::{Datelike, Timelike, Utc, FixedOffset};
 use teloxide::{
     prelude::*,
     types::{InlineKeyboardButton, InlineKeyboardMarkup},
 };
+
+/// 格式化为UTC+8时间字符串
+fn format_beijing_time(timestamp: chrono::DateTime<Utc>) -> String {
+    let beijing_tz = FixedOffset::east_opt(8 * 3600).unwrap();
+    timestamp.with_timezone(&beijing_tz).format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// 获取当前UTC+8时间字符串
+fn current_beijing_time() -> String {
+    format_beijing_time(Utc::now())
+}
 
 /// 处理/req命令 - 申请访客授权
 pub async fn req_command(
@@ -50,7 +61,10 @@ pub async fn req_command(
     if RecordRepository::has_pending_request(state.database.pool(), user_id).await? {
         bot.send_message(
             msg.chat.id,
-            "❌ 您已有待处理的授权请求\n请等待管理员处理或联系管理员取消之前的请求"
+            "❌ 您已有待处理的授权请求\n\n\
+             请等待管理员处理或联系管理员取消之前的请求\n\
+             💡 如果您的请求被拒绝，可以重新申请\n\
+             ⏰ 如果长时间无响应，请联系管理员确认"
         ).await?;
         return Ok(());
     }
@@ -59,7 +73,10 @@ pub async fn req_command(
     if RecordRepository::has_active_authorization(state.database.pool(), user_id).await? {
         bot.send_message(
             msg.chat.id,
-            "❌ 您当前已有活跃的授权\n一个用户同时只能有一个活跃授权"
+            "❌ 您当前已有活跃的授权\n\n\
+             一个用户同时只能有一个活跃授权\n\
+             💡 如需申请新的授权，请联系管理员撤销当前授权\n\
+             📋 您可以使用 /getpassword 获取当前授权的密码"
         ).await?;
         return Ok(());
     }
@@ -92,7 +109,7 @@ pub async fn req_command(
          💡 请耐心等待管理员审核",
         admin.id,
         record_id,
-        Utc::now().format("%Y-%m-%d %H:%M:%S")
+        current_beijing_time()
     );
 
     bot.send_message(msg.chat.id, visitor_message).await?;
@@ -129,26 +146,66 @@ pub async fn get_password_command(bot: Bot, msg: Message, state: BotState) -> Re
     let active_records = RecordRepository::find_active_by_visitor(state.database.pool(), user_id).await?;
 
     if active_records.is_empty() {
-        bot.send_message(
-            msg.chat.id,
-            "❌ 您当前没有活跃的授权\n\n\
-             请先使用 /req <邀请码> 申请授权"
-        ).await?;
+        // 检查是否有待处理的请求
+        if RecordRepository::has_pending_request(state.database.pool(), user_id).await? {
+            bot.send_message(
+                msg.chat.id,
+                "⏳ 您的授权请求正在等待管理员处理\n\n\
+                 请耐心等待管理员审核您的请求\n\
+                 💡 如果申请超过24小时无响应，建议：\n\
+                 • 联系邀请您的管理员确认\n\
+                 • 确认邀请码是否有效\n\
+                 • 检查是否遗漏管理员的回复消息"
+            ).await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "❌ 您当前没有活跃的授权\n\n\
+                 请先使用 /req <邀请码> 申请授权\n\
+                 \n\
+                 💡 获取邀请码的方式：\n\
+                 • 联系管理员获取邀请码\n\
+                 • 确认邀请码格式正确\n\
+                 • 如曾被拒绝，可重新申请"
+            ).await?;
+        }
         return Ok(());
     }
 
     // 处理访客密码请求
+    let mut password_generated = false;
+    let mut last_error = None;
+    
     for record in active_records {
         match generate_password_for_record(&bot, msg.chat.id, &record, &state).await {
             Ok(_) => {
                 log::info!("为访客 {} 生成了 {:?} 类型的密码", user_id, record.auth_type);
-                return Ok(());
+                password_generated = true;
+                break;
             }
             Err(e) => {
                 log::error!("为访客 {} 生成密码失败: {}", user_id, e);
-                bot.send_message(msg.chat.id, format!("❌ 密码生成失败: {}", e))
-                    .await?;
+                last_error = Some(e);
             }
+        }
+    }
+    
+    // 如果所有记录都生成失败，发送错误信息
+    if !password_generated {
+        if let Some(error) = last_error {
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "❌ 密码生成失败\n\n\
+                     错误详情：{}\n\n\
+                     💡 可能的解决方案：\n\
+                     • 等待几分钟后重试\n\
+                     • 检查您的授权是否已过期\n\
+                     • 联系管理员确认账户状态\n\
+                     • 如多次失败，请联系技术支持",
+                    error
+                )
+            ).await?;
         }
     }
 
@@ -231,31 +288,48 @@ async fn generate_password_for_record(
     record: &Record,
     state: &BotState,
 ) -> Result<()> {
+    // 首先检查授权是否已过期
+    if !record.is_active() {
+        return Err(crate::error::AppError::business("授权已过期，无法生成密码"));
+    }
+
     let user_service = state.user_service.read().await;
     let admin = user_service.get_admin_info_by_unique_id(record.inviter).await?
         .ok_or_else(|| crate::error::AppError::business("管理员信息不存在"))?;
 
     let admin_password = admin.password
         .ok_or_else(|| crate::error::AppError::business("管理员未设置密码"))?;
+    drop(user_service); // 释放用户服务锁
 
-    // 检查授权类型和特殊限制
+    // 统一处理所有授权类型的限制检查和密码生成
+    let mut password_service = state.password_service.write().await;
+    
     match record.auth_type {
         AuthType::LongtimeTemp => {
-            let mut password_service = state.password_service.write().await;
+            // 长期临时密码：检查5分钟限制
             if !password_service.can_generate_longtime_temp(record.vis_id) {
+                drop(password_service); // 释放锁
                 bot.send_message(
                     chat_id,
-                    "❌ 长期临时密码在5分钟内只能获取一次\n请稍后再试"
+                    "❌ 长期临时密码获取限制\n\n\
+                     ⏰ 每5分钟只能获取一次新密码\n\
+                     💡 这是为了安全考虑的限制\n\n\
+                     请等待后重试，或使用现有密码：\n\
+                     • 如果密码已过期，请等待5分钟\n\
+                     • 如果忘记密码，请联系管理员\n\
+                     • 每个密码有效期为10分钟"
                 ).await?;
                 return Ok(());
             }
             password_service.mark_longtime_temp_generated(record.vis_id);
         }
         _ => {
-            // 对于其他类型，检查是否已经生成过密码
-            let password_service = state.password_service.read().await;
+            // 其他类型：检查是否已生成过密码，如果是则阻止重复生成
             if let Some(existing_password) = password_service.has_generated_password(record.unique_id) {
-                // 已经生成过密码，直接返回
+                let existing_password = existing_password.clone(); // 克隆密码避免借用检查问题
+                drop(password_service); // 释放锁
+                
+                // 发送阻止消息，不再返回密码
                 let type_description = match record.auth_type {
                     AuthType::Limited => "时效密码",
                     AuthType::Period => "指定过期时间密码",
@@ -265,16 +339,18 @@ async fn generate_password_for_record(
                 };
 
                 let message = format!(
-                    "🔑 您的访问密码\n\n\
-                     密码：<code>{}</code>\n\
-                     类型：{}\n\
-                     过期时间：{}\n\n\
-                     💡 此密码已生成，请妥善保管\n\n\
-                     ⚠️ 请在有效期内使用，过期后需重新获取",
-                    existing_password,
+                    "❌ 密码获取限制\n\n\
+                     📋 授权类型：{}\n\
+                     🔒 此授权类型的密码只能生成一次\n\
+                     📱 您已经获取过此授权的密码\n\n\
+                     💡 建议操作：\n\
+                     • 查看之前收到的密码消息\n\
+                     • 如果密码丢失，请联系管理员\n\
+                     • 如需新密码，请重新申请授权\n\n\
+                     🔐 当前密码：<code>{}</code>\n\
+                     ⚠️ 请妥善保管，避免重复获取",
                     type_description,
-                    record.ended_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or("未设置".to_string())
+                    existing_password
                 );
 
                 bot.send_message(chat_id, message)
@@ -325,8 +401,7 @@ async fn generate_password_for_record(
         start_time: record.start_time,
     };
 
-    // 生成密码
-    let mut password_service = state.password_service.write().await;
+    // 生成密码 (使用已获取的password_service锁)
     let result = password_service.generate_password(&password_request, &state.config)?;
 
     // 格式化消息
@@ -338,17 +413,55 @@ async fn generate_password_for_record(
         AuthType::LongtimeTemp => "长期临时密码",
     };
 
+    let usage_tips = match record.auth_type {
+        AuthType::Times => format!(
+            "📊 使用说明：\n\
+             • 可用次数：{} 次\n\
+             • 每次使用会消耗一次机会\n\
+             • 剩余次数请注意合理使用",
+            record.times.unwrap_or(1)
+        ),
+        AuthType::Limited => format!(
+            "⏰ 使用说明：\n\
+             • 在有效期内可重复使用\n\
+             • 请在过期前完成所需操作\n\
+             • 过期后需重新申请授权"
+        ),
+        AuthType::Period => format!(
+            "📅 使用说明：\n\
+             • 在过期时间前可重复使用\n\
+             • 请合理安排使用时间\n\
+             • 过期后需重新申请授权"
+        ),
+        AuthType::Temp => format!(
+            "⚡ 使用说明：\n\
+             • 10分钟内可重复使用\n\
+             • 请尽快完成相关操作\n\
+             • 过期后可重新获取"
+        ),
+        AuthType::LongtimeTemp => format!(
+            "🔄 使用说明：\n\
+             • 每次密码有效期10分钟\n\
+             • 间隔5分钟可重新获取\n\
+             • 请在密码有效期内使用"
+        ),
+    };
+
     let message = format!(
-        "🔑 您的访问密码\n\n\
+        "🔑 访问密码生成成功！\n\n\
          密码：<code>{}</code>\n\
          类型：{}\n\
          过期时间：{}\n\n\
-         💡 {}\n\n\
-         ⚠️ 请在有效期内使用，过期后需重新获取",
+         {}\n\n\
+         💡 安全提示：\n\
+         • 请妥善保管密码，不要分享给他人\n\
+         • 建议复制保存，避免重复获取\n\
+         • 密码过期后请及时重新获取\n\
+         • 如遇问题请联系管理员",
         result.password,
         type_description,
         result.expire_time,
-        result.message
+        usage_tips
     );
 
     bot.send_message(chat_id, message)
@@ -360,9 +473,8 @@ async fn generate_password_for_record(
     RecordRepository::add_password(&mut tx, record.unique_id, &result.password).await?;
     tx.commit().await?;
 
-    // 对于非longtimetemp类型，缓存生成的密码
+    // 对于非longtimetemp类型，缓存生成的密码 (使用已获取的password_service锁)
     if record.auth_type != AuthType::LongtimeTemp {
-        let mut password_service = state.password_service.write().await;
         password_service.mark_password_generated(record.unique_id, result.password.clone());
     }
 
@@ -382,6 +494,7 @@ pub async fn generate_and_send_password(
 
     let admin_password = admin.password
         .ok_or_else(|| crate::error::AppError::business("管理员未设置密码"))?;
+    drop(user_service); // 释放用户服务锁
 
     // 根据授权类型构建密码请求参数
     let (hours, minutes, end_year, end_month, end_day, end_hour) = match record.auth_type {
@@ -423,9 +536,15 @@ pub async fn generate_and_send_password(
         start_time: record.start_time,
     };
 
-    // 生成密码
+    // 生成密码并标记缓存
     let mut password_service = state.password_service.write().await;
     let result = password_service.generate_password(&password_request, &state.config)?;
+    
+    // 对于非longtimetemp类型，立即缓存生成的密码
+    if record.auth_type != AuthType::LongtimeTemp {
+        password_service.mark_password_generated(record.unique_id, result.password.clone());
+    }
+    drop(password_service); // 释放密码服务锁
 
     // 将密码添加到记录中
     let mut tx = state.database.begin_transaction().await?;

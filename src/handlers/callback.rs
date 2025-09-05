@@ -5,8 +5,19 @@ use crate::database::RecordRepository;
 use crate::error::Result;
 use crate::handlers::{admin::handle_regenerate_invite_callback, visitor::{handle_approve_callback, handle_reject_callback}};
 use crate::types::{AuthType, CallbackData};
-use chrono::Utc;
+use chrono::{Utc, FixedOffset};
 use teloxide::{prelude::*, types::InlineKeyboardButton, types::InlineKeyboardMarkup};
+
+/// 格式化为UTC+8时间字符串
+fn format_beijing_time(timestamp: chrono::DateTime<Utc>) -> String {
+    let beijing_tz = FixedOffset::east_opt(8 * 3600).unwrap();
+    timestamp.with_timezone(&beijing_tz).format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// 获取当前UTC+8时间字符串
+fn current_beijing_time() -> String {
+    format_beijing_time(Utc::now())
+}
 
 /// 处理回调查询
 pub async fn handle_callback_query(
@@ -179,15 +190,17 @@ async fn handle_auth_temp_selection(
                              🆔 批准ID：{}\n\
                              📅 过期时间：{}\n\
                              🔑 密码：<code>{}</code>\n\n\
-                             💡 密码已自动生成，请妥善保管",
+                             💡 密码已自动生成，请妥善保管\n\
+                             ⚠️ 此密码10分钟后过期，请及时使用",
                              record_id,
-                             record.ended_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                             record.ended_time.map(|t| format_beijing_time(t))
                                  .unwrap_or("未设置".to_string()),
                              password
                         )
                     ).parse_mode(teloxide::types::ParseMode::Html).await.ok();
                 }
-                Err(_) => {
+                Err(e) => {
+                    log::error!("为访客 {} 生成临时密码失败: {}", record.vis_id, e);
                     bot.send_message(
                         visitor_chat_id,
                         format!(
@@ -196,9 +209,10 @@ async fn handle_auth_temp_selection(
                              ⏰ 有效期：10分钟\n\
                              🆔 批准ID：{}\n\
                              📅 过期时间：{}\n\n\
-                             使用 /getpassword 获取密码",
+                             ❗ 密码生成遇到问题，请使用 /getpassword 获取密码\n\
+                             💡 如多次获取失败，请联系管理员",
                              record_id,
-                             record.ended_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                             record.ended_time.map(|t| format_beijing_time(t))
                                  .unwrap_or("未设置".to_string())
                         )
                     ).await.ok();
@@ -215,7 +229,7 @@ async fn handle_auth_temp_selection(
                  🆔 记录ID：{}\n\
                  🕐 处理时间：{}",
                 record_id,
-                Utc::now().format("%Y-%m-%d %H:%M:%S")
+                current_beijing_time()
             );
 
             bot.edit_message_text(message.chat.id, message.id, updated_message).await?;
@@ -412,7 +426,7 @@ async fn handle_back_to_approve(
          👨‍💼 管理员ID：{}\n\n\
          请您仔细核验后批准",
         record.vis_id,
-        record.update_at.format("%Y-%m-%d %H:%M:%S"),
+        format_beijing_time(record.update_at),
         record_id,
         admin.id
     );
@@ -482,16 +496,18 @@ pub async fn handle_confirm_times_callback(
                              🆔 批准ID：{}\n\
                              📅 过期时间：{}\n\
                              🔑 密码：<code>{}</code>\n\n\
-                             💡 密码已自动生成，请妥善保管",
+                             💡 密码已自动生成，请妥善保管\n\
+                             ⚠️ 每次使用都会消耗一次使用次数",
                              times,
                              record_id,
-                             record.ended_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                             record.ended_time.map(|t| format_beijing_time(t))
                                  .unwrap_or("未设置".to_string()),
                              password
                         )
                     ).parse_mode(teloxide::types::ParseMode::Html).await.ok();
                 }
-                Err(_) => {
+                Err(e) => {
+                    log::error!("为访客 {} 生成次数密码失败: {}", record.vis_id, e);
                     bot.send_message(
                         visitor_chat_id,
                         format!(
@@ -501,10 +517,11 @@ pub async fn handle_confirm_times_callback(
                              ⏰ 有效期：2小时\n\
                              🆔 批准ID：{}\n\
                              📅 过期时间：{}\n\n\
-                             使用 /getpassword 获取密码",
+                             ❗ 密码生成遇到问题，请使用 /getpassword 获取密码\n\
+                             💡 如多次获取失败，请联系管理员",
                              times,
                              record_id,
-                             record.ended_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                             record.ended_time.map(|t| format_beijing_time(t))
                                  .unwrap_or("未设置".to_string())
                         )
                     ).await.ok();
@@ -523,7 +540,7 @@ pub async fn handle_confirm_times_callback(
                  🕐 处理时间：{}",
                 times,
                 record_id,
-                Utc::now().format("%Y-%m-%d %H:%M:%S")
+                current_beijing_time()
             );
 
             bot.edit_message_text(message.chat.id, message.id, updated_message).await?;
@@ -588,15 +605,17 @@ pub async fn handle_confirm_limited_callback(
                              📅 过期时间：{}\n\
                              🆔 批准ID：{}\n\
                              🔑 密码：<code>{}</code>\n\n\
-                             💡 密码已自动生成，请妥善保管",
+                             💡 密码已自动生成，请妥善保管\n\
+                             ⚠️ 密码在有效时长内可重复使用",
                              duration_str,
-                             end_time.unwrap().format("%Y-%m-%d %H:%M:%S"),
+                             format_beijing_time(end_time.unwrap()),
                              record_id,
                              password
                         )
                     ).parse_mode(teloxide::types::ParseMode::Html).await.ok();
                 }
-                Err(_) => {
+                Err(e) => {
+                    log::error!("为访客 {} 生成时效密码失败: {}", record.vis_id, e);
                     bot.send_message(
                         visitor_chat_id,
                         format!(
@@ -605,9 +624,10 @@ pub async fn handle_confirm_limited_callback(
                              ⏰ 有效时长：{}\n\
                              📅 过期时间：{}\n\
                              🆔 批准ID：{}\n\n\
-                             使用 /getpassword 获取密码",
+                             ❗ 密码生成遇到问题，请使用 /getpassword 获取密码\n\
+                             💡 如多次获取失败，请联系管理员",
                              duration_str,
-                             end_time.unwrap().format("%Y-%m-%d %H:%M:%S"),
+                             format_beijing_time(end_time.unwrap()),
                              record_id
                         )
                     ).await.ok();
@@ -625,9 +645,9 @@ pub async fn handle_confirm_limited_callback(
                  🆔 记录ID：{}\n\
                  🕐 处理时间：{}",
                 duration_str,
-                end_time.unwrap().format("%Y-%m-%d %H:%M:%S"),
+                format_beijing_time(end_time.unwrap()),
                 record_id,
-                Utc::now().format("%Y-%m-%d %H:%M:%S")
+                current_beijing_time()
             );
 
             bot.edit_message_text(message.chat.id, message.id, updated_message).await?;

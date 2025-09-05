@@ -42,9 +42,11 @@ pub async fn handle_text(bot: Bot, msg: Message, state: BotState) -> Result<()> 
 fn parse_period_auth_message(text: &str) -> Option<(i64, String)> {
     let parts: Vec<&str> = text.split_whitespace().collect();
     
-    if parts.len() == 3 && parts[0] == "期间" {
+    if parts.len() == 4 && parts[0] == "期间" {
         if let Ok(record_id) = parts[1].parse::<i64>() {
-            return Some((record_id, parts[2].to_string()));
+            // 组合日期和时间 "YYYY-MM-DD HH"
+            let datetime_str = format!("{} {}", parts[2], parts[3]);
+            return Some((record_id, datetime_str));
         }
     }
     
@@ -55,9 +57,11 @@ fn parse_period_auth_message(text: &str) -> Option<(i64, String)> {
 fn parse_longtime_temp_auth_message(text: &str) -> Option<(i64, String)> {
     let parts: Vec<&str> = text.split_whitespace().collect();
     
-    if parts.len() == 3 && parts[0] == "长期" {
+    if parts.len() == 4 && parts[0] == "长期" {
         if let Ok(record_id) = parts[1].parse::<i64>() {
-            return Some((record_id, parts[2].to_string()));
+            // 组合日期和时间 "YYYY-MM-DD HH:MM"
+            let datetime_str = format!("{} {}", parts[2], parts[3]);
+            return Some((record_id, datetime_str));
         }
     }
     
@@ -117,19 +121,46 @@ async fn handle_period_authorization(
     tx.commit().await?;
 
     if success {
-        // 通知访客
+        // 立即生成并推送密码给访客
         if let Some(record) = RecordRepository::find_by_id(state.database.pool(), record_id).await? {
             let visitor_chat_id = ChatId(record.vis_id);
-            bot.send_message(
-                visitor_chat_id,
-                format!(
-                    "✅ 您的授权已被批准！\n\n\
-                     📋 授权类型：指定过期时间密码\n\
-                     📅 过期时间：{}\n\n\
-                     使用 /getpassword 获取密码",
-                    end_time.format("%Y-%m-%d %H:%M:%S")
-                )
-            ).await.ok();
+            
+            // 生成并推送密码
+            match crate::handlers::visitor::generate_and_send_password(bot, visitor_chat_id, &record, state).await {
+                Ok(password) => {
+                    bot.send_message(
+                        visitor_chat_id,
+                        format!(
+                            "✅ 您的授权已被批准！\n\n\
+                             📋 授权类型：指定过期时间密码\n\
+                             📅 过期时间：{}\n\
+                             🆔 批准ID：{}\n\
+                             🔑 密码：<code>{}</code>\n\n\
+                             💡 密码已自动生成，请妥善保管\n\
+                             ⚠️ 密码在过期时间前可重复使用",
+                            end_time.format("%Y-%m-%d %H:%M:%S"),
+                            record_id,
+                            password
+                        )
+                    ).parse_mode(teloxide::types::ParseMode::Html).await.ok();
+                }
+                Err(e) => {
+                    log::error!("为访客 {} 生成指定过期时间密码失败: {}", record.vis_id, e);
+                    bot.send_message(
+                        visitor_chat_id,
+                        format!(
+                            "✅ 您的授权已被批准！\n\n\
+                             📋 授权类型：指定过期时间密码\n\
+                             📅 过期时间：{}\n\
+                             🆔 批准ID：{}\n\n\
+                             ❗ 密码生成遇到问题，请使用 /getpassword 获取密码\n\
+                             💡 如多次获取失败，请联系管理员",
+                            end_time.format("%Y-%m-%d %H:%M:%S"),
+                            record_id
+                        )
+                    ).await.ok();
+                }
+            }
         }
 
         // 确认消息给管理员
@@ -205,7 +236,7 @@ async fn handle_longtime_temp_authorization(
     tx.commit().await?;
 
     if success {
-        // 通知访客
+        // 通知访客（长期临时密码不自动推送，需要用户主动获取）
         if let Some(record) = RecordRepository::find_by_id(state.database.pool(), record_id).await? {
             let visitor_chat_id = ChatId(record.vis_id);
             bot.send_message(
@@ -214,9 +245,13 @@ async fn handle_longtime_temp_authorization(
                     "✅ 您的授权已被批准！\n\n\
                      📋 授权类型：长期临时密码\n\
                      📅 有效期至：{}\n\
+                     🆔 批准ID：{}\n\
                      ⏰ 可在5分钟间隔内重复获取密码\n\n\
-                     使用 /getpassword 获取密码",
-                    end_time.format("%Y-%m-%d %H:%M:%S")
+                     💡 使用 /getpassword 获取密码\n\
+                     ⚠️ 每次获取的密码有效期为10分钟\n\
+                     🔄 如需重新获取，请等待5分钟间隔",
+                    end_time.format("%Y-%m-%d %H:%M:%S"),
+                    record_id
                 )
             ).await.ok();
         }
@@ -306,24 +341,26 @@ mod tests {
     #[test]
     fn test_parse_period_auth_message() {
         assert_eq!(
-            parse_period_auth_message("期间 123 2024-12-25"),
-            Some((123, "2024-12-25".to_string()))
+            parse_period_auth_message("期间 123 2024-12-25 18"),
+            Some((123, "2024-12-25 18".to_string()))
         );
         
-        assert_eq!(parse_period_auth_message("期间 invalid 2024-12-25"), None);
-        assert_eq!(parse_period_auth_message("其他 123 2024-12-25"), None);
+        assert_eq!(parse_period_auth_message("期间 invalid 2024-12-25 18"), None);
+        assert_eq!(parse_period_auth_message("其他 123 2024-12-25 18"), None);
         assert_eq!(parse_period_auth_message("期间 123"), None);
+        assert_eq!(parse_period_auth_message("期间 123 2024-12-25"), None); // Missing hour
     }
 
     #[test]
     fn test_parse_longtime_temp_auth_message() {
         assert_eq!(
-            parse_longtime_temp_auth_message("长期 456 2024-12-31"),
-            Some((456, "2024-12-31".to_string()))
+            parse_longtime_temp_auth_message("长期 456 2024-12-31 23:59"),
+            Some((456, "2024-12-31 23:59".to_string()))
         );
         
-        assert_eq!(parse_longtime_temp_auth_message("长期 invalid 2024-12-31"), None);
-        assert_eq!(parse_longtime_temp_auth_message("期间 456 2024-12-31"), None);
+        assert_eq!(parse_longtime_temp_auth_message("长期 invalid 2024-12-31 23:59"), None);
+        assert_eq!(parse_longtime_temp_auth_message("期间 456 2024-12-31 23:59"), None);
+        assert_eq!(parse_longtime_temp_auth_message("长期 456 2024-12-31"), None); // Missing time
     }
 
     #[test]

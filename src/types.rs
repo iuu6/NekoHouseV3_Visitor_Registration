@@ -201,7 +201,7 @@ impl Record {
     pub fn is_active(&self) -> bool {
         match self.status {
             AuthStatus::Auth => {
-                // 检查是否过期
+                // 检查是否过期 - 使用UTC时间比较，因为数据库存储的就是UTC时间
                 if let Some(ended_time) = self.ended_time {
                     Utc::now() <= ended_time
                 } else {
@@ -272,6 +272,110 @@ impl UserInfo {
 pub struct CallbackData {
     pub action: String,
     pub data: Option<String>,
+}
+
+#[cfg(test)]
+mod timezone_tests {
+    use super::*;
+    use chrono::{Utc, FixedOffset, Timelike};
+
+    /// Test timezone conversion functions
+    #[test]
+    fn test_beijing_timezone_conversion() {
+        let utc_time = Utc::now();
+        let beijing_tz = FixedOffset::east_opt(8 * 3600).unwrap();
+        let beijing_time = utc_time.with_timezone(&beijing_tz);
+        
+        // The difference should be exactly 8 hours
+        let utc_hour = utc_time.hour();
+        let beijing_hour = beijing_time.hour();
+        
+        // Handle day boundary crossing
+        let hour_diff = if beijing_hour >= utc_hour {
+            beijing_hour - utc_hour
+        } else {
+            (beijing_hour + 24) - utc_hour
+        };
+        
+        assert_eq!(hour_diff, 8, "Beijing time should be 8 hours ahead of UTC");
+    }
+
+    /// Test the is_active method with UTC+8 timezone handling
+    #[test]
+    fn test_record_is_active_with_timezone() {
+        let beijing_tz = FixedOffset::east_opt(8 * 3600).unwrap();
+        
+        // Create a record with future expiry time
+        let mut record = Record::new(123456789, 1);
+        record.status = AuthStatus::Auth;
+        record.ended_time = Some(Utc::now() + chrono::Duration::hours(1));
+        
+        // Record should be active
+        assert!(record.is_active(), "Record with future expiry should be active");
+        
+        // Create a record with past expiry time
+        let mut expired_record = Record::new(987654321, 1);
+        expired_record.status = AuthStatus::Auth;
+        expired_record.ended_time = Some(Utc::now() - chrono::Duration::hours(1));
+        
+        // Record should be inactive
+        assert!(!expired_record.is_active(), "Record with past expiry should be inactive");
+        
+        // Create a record without expiry time
+        let mut no_expiry_record = Record::new(555666777, 1);
+        no_expiry_record.status = AuthStatus::Auth;
+        no_expiry_record.ended_time = None;
+        
+        // Record should be active
+        assert!(no_expiry_record.is_active(), "Record without expiry should be active");
+        
+        // Create a record with pending status
+        let mut pending_record = Record::new(111222333, 1);
+        pending_record.status = AuthStatus::Pending;
+        pending_record.ended_time = Some(Utc::now() + chrono::Duration::hours(1));
+        
+        // Record should be inactive due to pending status
+        assert!(!pending_record.is_active(), "Pending record should be inactive regardless of expiry");
+    }
+
+    /// Test timezone consistency between database queries and Record::is_active
+    #[test]
+    fn test_timezone_consistency() {
+        // This test simulates the database query logic using UTC+8
+        let current_utc = Utc::now();
+        let beijing_tz = FixedOffset::east_opt(8 * 3600).unwrap();
+        let current_beijing = current_utc.with_timezone(&beijing_tz);
+        
+        // Create a time that's 30 minutes from now
+        let future_utc = current_utc + chrono::Duration::minutes(30);
+        let future_beijing = future_utc.with_timezone(&beijing_tz);
+        
+        // Database query logic (simulated)
+        let db_considers_active = future_beijing > current_beijing;
+        
+        // Record::is_active logic
+        let mut record = Record::new(123456789, 1);
+        record.status = AuthStatus::Auth;
+        record.ended_time = Some(future_utc);
+        let record_considers_active = record.is_active();
+        
+        // Both should agree
+        assert_eq!(db_considers_active, record_considers_active,
+                  "Database query and Record::is_active should agree on timezone handling");
+        
+        // Test with past time
+        let past_utc = current_utc - chrono::Duration::minutes(30);
+        let past_beijing = past_utc.with_timezone(&beijing_tz);
+        
+        let db_considers_past_active = past_beijing > current_beijing;
+        
+        record.ended_time = Some(past_utc);
+        let record_considers_past_active = record.is_active();
+        
+        assert_eq!(db_considers_past_active, record_considers_past_active,
+                  "Database query and Record::is_active should agree on past expiry");
+        assert!(!db_considers_past_active, "Past expiry should be considered inactive");
+    }
 }
 
 impl CallbackData {

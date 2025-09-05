@@ -5,10 +5,22 @@ use crate::database::RecordRepository;
 use crate::error::Result;
 use crate::handlers::start::{get_user_display_name, validate_user_input};
 use crate::types::{AuthStatus, CallbackData};
+use chrono::{Utc, FixedOffset};
 use teloxide::{
     prelude::*,
     types::{InlineKeyboardButton, InlineKeyboardMarkup},
 };
+
+/// 格式化为UTC+8时间字符串
+fn format_beijing_time(timestamp: chrono::DateTime<Utc>) -> String {
+    let beijing_tz = FixedOffset::east_opt(8 * 3600).unwrap();
+    timestamp.with_timezone(&beijing_tz).format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// 获取当前UTC+8时间字符串
+fn current_beijing_time() -> String {
+    format_beijing_time(Utc::now())
+}
 
 /// 处理/addadmin命令 - 添加管理员（仅超级管理员）
 pub async fn add_admin_command(
@@ -338,7 +350,7 @@ pub async fn revoke_command(
             revoked_count,
             target,
             operator_name,
-            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
+            current_beijing_time()
         )
     } else {
         format!(
