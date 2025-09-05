@@ -469,6 +469,60 @@ impl RecordRepository {
             update_at: row.get("update_at"),
         })
     }
+
+    /// 获取记录的第一个密码（用于重复请求时返回）
+    pub async fn get_first_password(
+        pool: &sqlx::Pool<Sqlite>,
+        unique_id: i64,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query(
+            r#"
+            SELECT password FROM record WHERE unique_id = ?
+            "#,
+        )
+        .bind(unique_id)
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some(row) = row {
+            let password_json: Option<String> = row.get("password");
+            if let Some(json) = password_json {
+                let passwords: Vec<String> = serde_json::from_str(&json).unwrap_or_else(|_| Vec::new());
+                Ok(passwords.first().cloned())
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 检查记录是否已有密码（用于限制重复生成）
+    pub async fn has_passwords(
+        pool: &sqlx::Pool<Sqlite>,
+        unique_id: i64,
+    ) -> Result<bool> {
+        let row = sqlx::query(
+            r#"
+            SELECT password FROM record WHERE unique_id = ?
+            "#,
+        )
+        .bind(unique_id)
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some(row) = row {
+            let password_json: Option<String> = row.get("password");
+            if let Some(json) = password_json {
+                let passwords: Vec<String> = serde_json::from_str(&json).unwrap_or_else(|_| Vec::new());
+                Ok(!passwords.is_empty())
+            } else {
+                Ok(false)
+            }
+        } else {
+            Ok(false)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -598,6 +652,89 @@ mod tests {
         assert_eq!(pending, 1);
         assert_eq!(authorized, 1);
         assert_eq!(revoked, 0);
+
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_password_persistence() -> Result<()> {
+        let (db, admin_id) = setup_test_db().await?;
+        let pool = db.pool();
+
+        // 创建测试记录
+        let mut tx = db.begin_transaction().await?;
+        let mut record = Record::new(123456789, admin_id);
+        record.status = AuthStatus::Auth;
+        record.auth_type = AuthType::Temp;
+        let record_id = RecordRepository::create(&mut tx, &record).await?;
+        tx.commit().await?;
+
+        // 测试初始状态 - 不应该有密码
+        let has_password_before = RecordRepository::has_passwords(pool, record_id).await?;
+        assert!(!has_password_before, "初始状态不应该有密码");
+
+        let first_password_before = RecordRepository::get_first_password(pool, record_id).await?;
+        assert_eq!(first_password_before, None, "初始状态不应该有第一个密码");
+
+        // 添加密码
+        let mut tx = db.begin_transaction().await?;
+        RecordRepository::add_password(&mut tx, record_id, "5001234567").await?;
+        tx.commit().await?;
+
+        // 测试添加密码后的状态
+        let has_password_after = RecordRepository::has_passwords(pool, record_id).await?;
+        assert!(has_password_after, "添加密码后应该检测到有密码");
+
+        let first_password_after = RecordRepository::get_first_password(pool, record_id).await?;
+        assert_eq!(first_password_after, Some("5001234567".to_string()), "应该返回正确的第一个密码");
+
+        // 添加第二个密码
+        let mut tx = db.begin_transaction().await?;
+        RecordRepository::add_password(&mut tx, record_id, "5001234568").await?;
+        tx.commit().await?;
+
+        // 测试应该仍然返回第一个密码
+        let first_password_still = RecordRepository::get_first_password(pool, record_id).await?;
+        assert_eq!(first_password_still, Some("5001234567".to_string()), "应该始终返回第一个密码");
+
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_password_service_database_check() -> Result<()> {
+        let (db, admin_id) = setup_test_db().await?;
+        let pool = db.pool();
+
+        // 创建测试记录
+        let mut tx = db.begin_transaction().await?;
+        let mut record = Record::new(987654321, admin_id);
+        record.status = AuthStatus::Auth;
+        record.auth_type = AuthType::Limited;
+        let record_id = RecordRepository::create(&mut tx, &record).await?;
+        tx.commit().await?;
+
+        // 创建PasswordService实例
+        let password_service = crate::auth::PasswordService::new();
+
+        // 测试初始状态 - 不应该有密码
+        let existing_password_before = password_service.has_generated_password(pool, record_id).await?;
+        assert_eq!(existing_password_before, None, "初始状态PasswordService不应该检测到密码");
+
+        // 添加密码到数据库
+        let mut tx = db.begin_transaction().await?;
+        RecordRepository::add_password(&mut tx, record_id, "5009876543").await?;
+        tx.commit().await?;
+
+        // 测试PasswordService能检测到数据库中的密码
+        let existing_password_after = password_service.has_generated_password(pool, record_id).await?;
+        assert_eq!(existing_password_after, Some("5009876543".to_string()), "PasswordService应该检测到数据库中的密码");
+
+        // 模拟服务器重启 - 创建新的PasswordService实例
+        let new_password_service = crate::auth::PasswordService::new();
+        let password_after_restart = new_password_service.has_generated_password(pool, record_id).await?;
+        assert_eq!(password_after_restart, Some("5009876543".to_string()), "重启后PasswordService仍应该检测到密码");
 
         db.close().await;
         Ok(())

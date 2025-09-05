@@ -172,11 +172,19 @@ pub async fn get_password_command(bot: Bot, msg: Message, state: BotState) -> Re
         return Ok(());
     }
 
-    // 处理访客密码请求
+    // 处理访客密码请求 - 添加详细的过期检查
     let mut password_generated = false;
     let mut last_error = None;
+    let mut expired_count = 0;
     
     for record in active_records {
+        // 双重检查记录是否确实活跃
+        if !record.is_active() {
+            expired_count += 1;
+            log::warn!("记录 {} 被标记为活跃但实际已过期", record.unique_id);
+            continue;
+        }
+        
         match generate_password_for_record(&bot, msg.chat.id, &record, &state).await {
             Ok(_) => {
                 log::info!("为访客 {} 生成了 {:?} 类型的密码", user_id, record.auth_type);
@@ -190,21 +198,58 @@ pub async fn get_password_command(bot: Bot, msg: Message, state: BotState) -> Re
         }
     }
     
+    // 如果所有记录都已过期，发送特殊的过期消息
+    if expired_count > 0 && !password_generated {
+        bot.send_message(
+            msg.chat.id,
+            "❌ 您的授权已过期\n\n\
+             📅 所有活跃授权都已超过有效期\n\
+             💡 请重新申请授权：\n\
+             • 联系管理员获取新的邀请码\n\
+             • 使用 /req <邀请码> 重新申请\n\
+             • 如有疑问请联系管理员确认"
+        ).await?;
+        return Ok(());
+    }
+    
     // 如果所有记录都生成失败，发送错误信息
     if !password_generated {
         if let Some(error) = last_error {
+            let error_msg = error.to_string();
+            
+            // 根据错误类型提供更具体的建议
+            let (title, solutions) = if error_msg.contains("已过期") || error_msg.contains("结束时间必须晚于当前时间") {
+                (
+                    "❌ 授权已过期",
+                    "📅 您的访问授权已超过有效期\n\n\
+                     💡 解决方案：\n\
+                     • 联系管理员重新申请授权\n\
+                     • 获取新的邀请码后使用 /req <邀请码> 申请\n\
+                     • 如有疑问请联系邀请您的管理员"
+                )
+            } else if error_msg.contains("密码生成错误") {
+                (
+                    "❌ 密码生成失败",
+                    "🔧 技术问题导致密码无法生成\n\n\
+                     💡 解决方案：\n\
+                     • 等待几分钟后重试\n\
+                     • 联系管理员确认授权状态\n\
+                     • 如持续失败请联系技术支持"
+                )
+            } else {
+                (
+                    "❌ 密码获取失败",
+                    "💡 可能的解决方案：\n\
+                     • 等待几分钟后重试\n\
+                     • 检查您的授权是否有效\n\
+                     • 联系管理员确认账户状态\n\
+                     • 如多次失败，请联系技术支持"
+                )
+            };
+            
             bot.send_message(
                 msg.chat.id,
-                format!(
-                    "❌ 密码生成失败\n\n\
-                     错误详情：{}\n\n\
-                     💡 可能的解决方案：\n\
-                     • 等待几分钟后重试\n\
-                     • 检查您的授权是否已过期\n\
-                     • 联系管理员确认账户状态\n\
-                     • 如多次失败，请联系技术支持",
-                    error
-                )
+                format!("{}\n\n错误详情：{}\n\n{}", title, error_msg, solutions)
             ).await?;
         }
     }
@@ -288,9 +333,19 @@ async fn generate_password_for_record(
     record: &Record,
     state: &BotState,
 ) -> Result<()> {
-    // 首先检查授权是否已过期
+    // 首先检查授权是否已过期 - 更详细的检查
     if !record.is_active() {
-        return Err(crate::error::AppError::business("授权已过期，无法生成密码"));
+        let expire_info = if let Some(ended_time) = record.ended_time {
+            let beijing_tz = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+            let ended_time_beijing = ended_time.with_timezone(&beijing_tz);
+            let current_time_beijing = chrono::Utc::now().with_timezone(&beijing_tz);
+            format!("授权已于 {} 过期（当前时间：{}）",
+                   ended_time_beijing.format("%Y-%m-%d %H:%M:%S"),
+                   current_time_beijing.format("%Y-%m-%d %H:%M:%S"))
+        } else {
+            "授权已过期".to_string()
+        };
+        return Err(crate::error::AppError::business(&expire_info));
     }
 
     let user_service = state.user_service.read().await;
@@ -324,9 +379,8 @@ async fn generate_password_for_record(
             password_service.mark_longtime_temp_generated(record.vis_id);
         }
         _ => {
-            // 其他类型：检查是否已生成过密码，如果是则阻止重复生成
-            if let Some(existing_password) = password_service.has_generated_password(record.unique_id) {
-                let existing_password = existing_password.clone(); // 克隆密码避免借用检查问题
+            // 其他类型：检查数据库中是否已生成过密码，如果是则阻止重复生成
+            if let Some(existing_password) = password_service.has_generated_password(state.database.pool(), record.unique_id).await? {
                 drop(password_service); // 释放锁
                 
                 // 发送阻止消息，不再返回密码
@@ -377,9 +431,12 @@ async fn generate_password_for_record(
             }
         },
         AuthType::Period => {
-            // 从结束时间提取年月日时
+            // 从结束时间提取年月日时 - 需要转换为UTC+8时区
             if let Some(end) = record.ended_time {
-                (None, None, Some(end.year() as u32), Some(end.month()), Some(end.day()), Some(end.hour()))
+                // 将数据库中的UTC时间转换为UTC+8时区，然后提取时间组件
+                let beijing_tz = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+                let end_beijing = end.with_timezone(&beijing_tz);
+                (None, None, Some(end_beijing.year() as u32), Some(end_beijing.month()), Some(end_beijing.day()), Some(end_beijing.hour()))
             } else {
                 return Err(crate::error::AppError::business("周期密码缺少结束时间"));
             }
@@ -473,11 +530,6 @@ async fn generate_password_for_record(
     RecordRepository::add_password(&mut tx, record.unique_id, &result.password).await?;
     tx.commit().await?;
 
-    // 对于非longtimetemp类型，缓存生成的密码 (使用已获取的password_service锁)
-    if record.auth_type != AuthType::LongtimeTemp {
-        password_service.mark_password_generated(record.unique_id, result.password.clone());
-    }
-
     Ok(())
 }
 
@@ -488,6 +540,21 @@ pub async fn generate_and_send_password(
     record: &Record,
     state: &BotState,
 ) -> Result<String> {
+    // 首先检查授权是否已过期
+    if !record.is_active() {
+        let expire_info = if let Some(ended_time) = record.ended_time {
+            let beijing_tz = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+            let ended_time_beijing = ended_time.with_timezone(&beijing_tz);
+            let current_time_beijing = chrono::Utc::now().with_timezone(&beijing_tz);
+            format!("授权已于 {} 过期（当前时间：{}）",
+                   ended_time_beijing.format("%Y-%m-%d %H:%M:%S"),
+                   current_time_beijing.format("%Y-%m-%d %H:%M:%S"))
+        } else {
+            "授权已过期".to_string()
+        };
+        return Err(crate::error::AppError::business(&expire_info));
+    }
+
     let user_service = state.user_service.read().await;
     let admin = user_service.get_admin_info_by_unique_id(record.inviter).await?
         .ok_or_else(|| crate::error::AppError::business("管理员信息不存在"))?;
@@ -512,9 +579,12 @@ pub async fn generate_and_send_password(
             }
         },
         AuthType::Period => {
-            // 从结束时间提取年月日时
+            // 从结束时间提取年月日时 - 需要转换为UTC+8时区
             if let Some(end) = record.ended_time {
-                (None, None, Some(end.year() as u32), Some(end.month()), Some(end.day()), Some(end.hour()))
+                // 将数据库中的UTC时间转换为UTC+8时区，然后提取时间组件
+                let beijing_tz = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+                let end_beijing = end.with_timezone(&beijing_tz);
+                (None, None, Some(end_beijing.year() as u32), Some(end_beijing.month()), Some(end_beijing.day()), Some(end_beijing.hour()))
             } else {
                 return Err(crate::error::AppError::business("周期密码缺少结束时间"));
             }
@@ -536,14 +606,9 @@ pub async fn generate_and_send_password(
         start_time: record.start_time,
     };
 
-    // 生成密码并标记缓存
+    // 生成密码
     let mut password_service = state.password_service.write().await;
     let result = password_service.generate_password(&password_request, &state.config)?;
-    
-    // 对于非longtimetemp类型，立即缓存生成的密码
-    if record.auth_type != AuthType::LongtimeTemp {
-        password_service.mark_password_generated(record.unique_id, result.password.clone());
-    }
     drop(password_service); // 释放密码服务锁
 
     // 将密码添加到记录中

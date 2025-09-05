@@ -14,8 +14,6 @@ pub struct PasswordService {
     _generator: UnifiedPasswordGenerator,
     /// 用于跟踪长期临时密码的最后生成时间
     longtime_temp_cache: HashMap<i64, DateTime<Utc>>,
-    /// 用于跟踪已生成密码的记录ID（除longtimetemp外只生成一次）
-    generated_passwords_cache: HashMap<i64, String>,
 }
 
 impl PasswordService {
@@ -24,7 +22,6 @@ impl PasswordService {
         Self {
             _generator: UnifiedPasswordGenerator::new(),
             longtime_temp_cache: HashMap::new(),
-            generated_passwords_cache: HashMap::new(),
         }
     }
 
@@ -90,25 +87,9 @@ impl PasswordService {
         });
     }
 
-    /// 检查记录是否已生成过密码（除longtimetemp外）
-    pub fn has_generated_password(&self, record_id: i64) -> Option<&String> {
-        self.generated_passwords_cache.get(&record_id)
-    }
-
-    /// 标记记录已生成密码
-    pub fn mark_password_generated(&mut self, record_id: i64, password: String) {
-        self.generated_passwords_cache.insert(record_id, password);
-    }
-
-    /// 清理已生成密码缓存
-    pub fn cleanup_generated_passwords_cache(&mut self) {
-        // 保留最近1000个记录
-        if self.generated_passwords_cache.len() > 1000 {
-            let mut entries: Vec<_> = self.generated_passwords_cache.drain().collect();
-            entries.sort_by_key(|&(k, _)| k);
-            entries.truncate(1000);
-            self.generated_passwords_cache = entries.into_iter().collect();
-        }
+    /// 检查记录是否已生成过密码（基于数据库）
+    pub async fn has_generated_password(&self, pool: &sqlx::Pool<sqlx::Sqlite>, record_id: i64) -> crate::error::Result<Option<String>> {
+        crate::database::RecordRepository::get_first_password(pool, record_id).await
     }
 
     /// 生成临时密码（10分钟有效）
@@ -414,8 +395,8 @@ mod tests {
         assert!(service.validate_request(&request).is_err());
     }
 
-    #[test]
-    fn test_longtime_temp_cache() {
+    #[tokio::test]
+    async fn test_longtime_temp_cache() {
         let mut service = PasswordService::new();
         let user_id = 123456789;
 
